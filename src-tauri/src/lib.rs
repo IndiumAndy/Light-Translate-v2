@@ -559,7 +559,6 @@ impl AppController {
             let ctrl_fast = Arc::clone(self);
             let text_fast = snapshot.text.clone();
             let target_lang = settings.target_language.clone();
-            let fast_engine = settings.fast_mt_engine;
 
             tauri::async_runtime::spawn(async move {
                 let fast_key = CacheKey::new(
@@ -573,7 +572,7 @@ impl AppController {
                 let result = if let Some(cached) = ctrl_fast.cache.get(&fast_key) {
                     Ok(cached)
                 } else {
-                    let r = translate_fast_machine(&text_fast, &target_lang, fast_engine).await;
+                    let r = translate_fast_machine(&text_fast, &target_lang).await;
                     if let Ok(val) = &r {
                         ctrl_fast.cache.insert(fast_key, val.clone());
                     }
@@ -1095,7 +1094,7 @@ async fn manual_translate_stream(
     let mut fast_res = None;
     if settings.enable_fast_mt && mode != QueryMode::Explanation {
         if let Ok(ft) =
-            translate_fast_machine(&trimmed, &settings.target_language, settings.fast_mt_engine)
+            translate_fast_machine(&trimmed, &settings.target_language)
                 .await
         {
             fast_res = Some(ft.clone());
