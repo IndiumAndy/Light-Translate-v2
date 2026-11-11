@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum PlatformInputEvent {
     TriggerPressed {
         sentence_modifier: bool,
@@ -19,6 +19,8 @@ pub enum PlatformInputEvent {
     },
     TriggerReleased {
         pointer: ScreenPoint,
+        #[serde(default)]
+        clean_tap: bool,
     },
     SentenceModifierChanged {
         active: bool,
@@ -31,6 +33,7 @@ pub enum PlatformInputEvent {
         pointer: ScreenPoint,
     },
     EscapePressed,
+    OtherKeyPressed,
     GlobalMouseDown {
         pointer: ScreenPoint,
     },
@@ -106,6 +109,11 @@ pub trait PlatformBackend: Send + Sync {
     /// Check (and optionally prompt for) OS Accessibility / Screen Recording permissions.
     fn permissions_status(&self, prompt_accessibility: bool) -> PermissionsStatus;
 
+    /// Explicitly request Screen Recording permission where applicable (macOS).
+    fn request_screen_recording(&self) -> bool {
+        true
+    }
+
     /// Write plain text to system clipboard (explicit user Copy action only).
     fn write_clipboard(&self, text: &str) -> Result<(), String>;
 
@@ -134,5 +142,41 @@ pub fn create_platform_backend() -> Arc<dyn PlatformBackend> {
     #[cfg(target_os = "linux")]
     {
         Arc::new(linux::LinuxPlatform::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_camel_case_native_input_events() {
+        let pressed: PlatformInputEvent = serde_json::from_str(
+            r#"{"kind":"triggerPressed","sentenceModifier":true,"pointer":{"x":420.5,"y":310.0}}"#,
+        )
+        .expect("triggerPressed must deserialize camelCase sentenceModifier");
+        assert_eq!(
+            pressed,
+            PlatformInputEvent::TriggerPressed {
+                sentence_modifier: true,
+                pointer: ScreenPoint::new(420.5, 310.0),
+            }
+        );
+
+        let released: PlatformInputEvent = serde_json::from_str(
+            r#"{"kind":"triggerReleased","cleanTap":true,"pointer":{"x":420.5,"y":310.0}}"#,
+        )
+        .expect("triggerReleased must deserialize camelCase cleanTap");
+        assert_eq!(
+            released,
+            PlatformInputEvent::TriggerReleased {
+                pointer: ScreenPoint::new(420.5, 310.0),
+                clean_tap: true,
+            }
+        );
+
+        let other: PlatformInputEvent =
+            serde_json::from_str(r#"{"kind":"otherKeyPressed"}"#).expect("otherKeyPressed");
+        assert_eq!(other, PlatformInputEvent::OtherKeyPressed);
     }
 }

@@ -29,16 +29,17 @@
         "label": "popup",
         "title": "Light Translate Popup",
         "url": "popup.html",
-        "width": 380,
-        "height": 220,
+        "width": 360,
+        "height": 110,
         "visible": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "focus": false,
+        "focusable": false,
         "resizable": false,
-        "shadow": false
+        "shadow": true
       },
       {
         "label": "capture",

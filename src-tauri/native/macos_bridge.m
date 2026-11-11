@@ -3,6 +3,7 @@
 #import <Carbon/Carbon.h>
 #import <Cocoa/Cocoa.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <Vision/Vision.h>
 #import <objc/runtime.h>
@@ -87,11 +88,18 @@ static bool g_double_tap_enabled = true;
 
 static bool g_trigger_down = false;
 static bool g_sentence_mod_down = false;
+static bool g_left_opt_down = false;
+static bool g_right_opt_down = false;
+static bool g_left_ctrl_down = false;
+static bool g_right_ctrl_down = false;
 static bool g_other_key_during_tap = false;
 static CFAbsoluteTime g_last_tap_release_time = 0.0;
 static CGPoint g_tap_press_point = {0, 0};
 static CFAbsoluteTime g_tap_press_time = 0.0;
 static uint32_t g_PopupWindowNumber = 0;
+static id g_global_key_monitor = nil;
+static id g_global_mouse_monitor = nil;
+static id g_local_event_monitor = nil;
 
 // Device-dependent modifier masks in CGEventFlags / NSEventModifierFlags
 #ifndef NX_DEVICELALTKEYMASK
@@ -152,17 +160,54 @@ void lt_macos_get_monitor_bounds(double x, double y, double *out_x, double *out_
     *out_h = mainB.size.height;
 }
 
+static void lt_sync_modifier_keycodes(unsigned short keyCode, NSEventModifierFlags flags) {
+    bool optAny = (flags & NSEventModifierFlagOption) != 0;
+    bool ctrlAny = (flags & NSEventModifierFlagControl) != 0;
+
+    if (!optAny) {
+        g_left_opt_down = false;
+        g_right_opt_down = false;
+    } else {
+        if (keyCode == kVK_Option) { // 58
+            g_left_opt_down = !g_left_opt_down;
+        } else if (keyCode == kVK_RightOption) { // 61
+            g_right_opt_down = !g_right_opt_down;
+        }
+        // Fallback to IOKit device masks when Option was already held or synthesized
+        if (!g_left_opt_down && !g_right_opt_down) {
+            g_left_opt_down = (flags & NX_DEVICELALTKEYMASK) != 0;
+            g_right_opt_down = (flags & NX_DEVICERALTKEYMASK) != 0;
+        }
+    }
+
+    if (!ctrlAny) {
+        g_left_ctrl_down = false;
+        g_right_ctrl_down = false;
+    } else {
+        if (keyCode == kVK_Control) { // 59
+            g_left_ctrl_down = !g_left_ctrl_down;
+        } else if (keyCode == kVK_RightControl) { // 62
+            g_right_ctrl_down = !g_right_ctrl_down;
+        }
+        if (!g_left_ctrl_down && !g_right_ctrl_down) {
+            g_left_ctrl_down = (flags & NX_DEVICELCTLKEYMASK) != 0;
+            g_right_ctrl_down = (flags & NX_DEVICERCTLKEYMASK) != 0;
+        }
+    }
+}
+
 static bool lt_is_trigger_active(NSEventModifierFlags flags) {
+    bool optAny = (flags & NSEventModifierFlagOption) != 0;
     switch (g_trigger_modifier) {
         case 1: // LeftOption
-            return (flags & NSEventModifierFlagOption) && ((flags & NX_DEVICELALTKEYMASK) != 0);
+            return optAny && (g_left_opt_down || ((flags & NX_DEVICELALTKEYMASK) != 0));
         case 2: // RightOption
-            return (flags & NSEventModifierFlagOption) && ((flags & NX_DEVICERALTKEYMASK) != 0);
+            return optAny && (g_right_opt_down || ((flags & NX_DEVICERALTKEYMASK) != 0));
         case 3: // Control
             return (flags & NSEventModifierFlagControl) != 0;
         case 0: // AltOrOption
         default:
-            return (flags & NSEventModifierFlagOption) != 0;
+            return optAny;
     }
 }
 
@@ -181,15 +226,22 @@ static void lt_handle_ns_event(NSEvent *event) {
 
     if (type == NSEventTypeFlagsChanged) {
         NSEventModifierFlags flags = [event modifierFlags];
+        unsigned short keyCode = [event keyCode];
+        lt_sync_modifier_keycodes(keyCode, flags);
+
         // Ignore Command-chord shortcuts so Cmd+Tab / Cmd+Option+I never false-trigger hover!
         bool cmdHeld = (flags & NSEventModifierFlagCommand) != 0;
+        bool shiftHeld = (flags & NSEventModifierFlagShift) != 0;
+        if (cmdHeld || shiftHeld) {
+            g_other_key_during_tap = true;
+        }
         bool nowTrigger = !cmdHeld && lt_is_trigger_active(flags);
         bool nowSentence = lt_is_sentence_mod_active(flags);
 
         if (nowTrigger && !g_trigger_down) {
             g_trigger_down = true;
             g_sentence_mod_down = nowSentence;
-            g_other_key_during_tap = nowSentence;
+            g_other_key_during_tap = nowSentence || cmdHeld || shiftHeld;
             g_tap_press_time = CFAbsoluteTimeGetCurrent();
             g_tap_press_point = pt;
 
@@ -202,16 +254,18 @@ static void lt_handle_ns_event(NSEvent *event) {
             g_trigger_down = false;
             g_sentence_mod_down = false;
             CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            double tapDuration = now - g_tap_press_time;
+            double moveDist = hypot(pt.x - g_tap_press_point.x, pt.y - g_tap_press_point.y);
+            bool cleanTap = (!g_other_key_during_tap && !cmdHeld && !shiftHeld && tapDuration < 0.28 && moveDist < 12.0);
 
             lt_emit_event(@{
                 @"kind": @"triggerReleased",
+                @"cleanTap": @(cleanTap),
                 @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
             });
 
             // Check clean double-tap for selection translation
-            double tapDuration = now - g_tap_press_time;
-            double moveDist = hypot(pt.x - g_tap_press_point.x, pt.y - g_tap_press_point.y);
-            if (g_double_tap_enabled && !g_other_key_during_tap && !cmdHeld && tapDuration < 0.28 && moveDist < 12.0) {
+            if (g_double_tap_enabled && cleanTap) {
                 if (now - g_last_tap_release_time <= 0.36) {
                     g_last_tap_release_time = 0.0;
                     lt_emit_event(@{
@@ -264,6 +318,8 @@ static void lt_handle_ns_event(NSEvent *event) {
             lt_emit_event(@{ @"kind": @"shortcutCapture" });
             return;
         }
+
+        lt_emit_event(@{ @"kind": @"otherKeyPressed" });
         return;
     }
 
@@ -287,19 +343,27 @@ static void lt_handle_ns_event(NSEvent *event) {
 void lt_macos_start_input_monitor(lt_input_event_cb callback) {
     g_input_cb = callback;
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSEventMask mask = NSEventMaskFlagsChanged
-                         | NSEventMaskKeyDown
-                         | NSEventMaskMouseMoved
-                         | NSEventMaskLeftMouseDragged
-                         | NSEventMaskLeftMouseDown
-                         | NSEventMaskRightMouseDown
-                         | NSEventMaskOtherMouseDown;
+        NSEventMask keyMask = NSEventMaskFlagsChanged | NSEventMaskKeyDown;
+        NSEventMask mouseMask = NSEventMaskMouseMoved
+                              | NSEventMaskLeftMouseDragged
+                              | NSEventMaskRightMouseDragged
+                              | NSEventMaskLeftMouseDown
+                              | NSEventMaskRightMouseDown
+                              | NSEventMaskOtherMouseDown;
 
-        [NSEvent addGlobalMonitorForEventsMatchingMask:mask handler:^(NSEvent *event) {
+        if (g_global_key_monitor) [NSEvent removeMonitor:g_global_key_monitor];
+        if (g_global_mouse_monitor) [NSEvent removeMonitor:g_global_mouse_monitor];
+        if (g_local_event_monitor) [NSEvent removeMonitor:g_local_event_monitor];
+
+        g_global_key_monitor = [NSEvent addGlobalMonitorForEventsMatchingMask:keyMask handler:^(NSEvent *event) {
             lt_handle_ns_event(event);
         }];
 
-        [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent *(NSEvent *event) {
+        g_global_mouse_monitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mouseMask handler:^(NSEvent *event) {
+            lt_handle_ns_event(event);
+        }];
+
+        g_local_event_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:(keyMask | mouseMask) handler:^NSEvent *(NSEvent *event) {
             lt_handle_ns_event(event);
             return event;
         }];
@@ -325,6 +389,10 @@ bool lt_macos_check_accessibility(bool prompt) {
 
 bool lt_macos_check_screen_recording(void) {
     return CGPreflightScreenCaptureAccess();
+}
+
+bool lt_macos_request_screen_recording(void) {
+    return CGRequestScreenCaptureAccess();
 }
 
 bool lt_macos_write_clipboard(const char *text_utf8) {
@@ -366,9 +434,11 @@ static LTWindowHit lt_topmost_window_at(CGPoint pt) {
         double alpha = info[(id)kCGWindowAlpha] ? [info[(id)kCGWindowAlpha] doubleValue] : 1.0;
 
         if (ownerPid <= 0 || ownerPid == selfPid || alpha <= 0.01) continue;
-        // Allow normal windows (0) plus floating panels, popovers, and context menus (<= 110);
-        // exclude system lockscreen/screensaver/security shield layers (>= 1000).
-        if (layer < 0 || layer > 110) continue;
+        // Strictly match normal app windows (0), floating/modal app panels (3, 8), and popup context menus (101).
+        // Never match system HUD/overlay layers such as Screenshot (`screencaptureui` at layer 24) or Control Center (25)!
+        if (!(layer == 0 || layer == 3 || layer == 8 || layer == NSPopUpMenuWindowLevel)) {
+            continue;
+        }
 
         NSDictionary *boundsDict = info[(id)kCGWindowBounds];
         CGRect rect = CGRectZero;
@@ -381,7 +451,14 @@ static LTWindowHit lt_topmost_window_at(CGPoint pt) {
             NSString *ownerName = info[(id)kCGWindowOwnerName] ?: @"";
             if ([ownerName isEqualToString:@"Window Server"] ||
                 [ownerName isEqualToString:@"loginwindow"] ||
-                [ownerName isEqualToString:@"ScreenSaverEngine"]) {
+                [ownerName isEqualToString:@"ScreenSaverEngine"] ||
+                [ownerName isEqualToString:@"Screenshot"] ||
+                [ownerName isEqualToString:@"screencaptureui"] ||
+                [ownerName isEqualToString:@"Control Center"] ||
+                [ownerName isEqualToString:@"Dock"] ||
+                [ownerName isEqualToString:@"WindowManager"] ||
+                [ownerName isEqualToString:@"SystemUIServer"] ||
+                [ownerName isEqualToString:@"Notification Center"]) {
                 continue;
             }
             res.pid = ownerPid;
@@ -426,16 +503,16 @@ static NSMutableSet<NSNumber *> *lt_awakened_pids(void) {
     return set;
 }
 
-static void lt_ensure_app_ax_awake(pid_t pid, NSString *bundleId) {
-    if (pid <= 0) return;
+static bool lt_ensure_app_ax_awake(pid_t pid, NSString *bundleId) {
+    if (pid <= 0) return false;
     NSMutableSet<NSNumber *> *awakened = lt_awakened_pids();
     @synchronized (awakened) {
-        if ([awakened containsObject:@(pid)]) return;
+        if ([awakened containsObject:@(pid)]) return false;
         [awakened addObject:@(pid)];
     }
 
     AXUIElementRef appElem = AXUIElementCreateApplication(pid);
-    if (!appElem) return;
+    if (!appElem) return false;
     AXUIElementSetMessagingTimeout(appElem, 0.25f);
 
     // Inject AXManualAccessibility = true to wake Chromium, Electron, Firefox, Arc, Brave, VS Code, Notion, etc.
@@ -453,10 +530,14 @@ static void lt_ensure_app_ax_awake(pid_t pid, NSString *bundleId) {
         [lower containsString:@"electron"] ||
         [lower containsString:@"notion"] ||
         [lower containsString:@"obsidian"] ||
-        [lower containsString:@"cursor"]) {
+        [lower containsString:@"cursor"] ||
+        [lower containsString:@"antigravity"] ||
+        [lower containsString:@"ego"] ||
+        [lower containsString:@"grok"]) {
         AXUIElementSetAttributeValue(appElem, CFSTR("AXEnhancedUserInterface"), kCFBooleanTrue);
     }
     CFRelease(appElem);
+    return true;
 }
 
 static NSString *lt_ax_string(AXUIElementRef elem, CFStringRef attr) {
@@ -934,7 +1015,7 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
     }
 
     NSString *appId = lt_bundle_id_for_pid(winHit.pid);
-    lt_ensure_app_ax_awake(winHit.pid, appId);
+    bool justAwakened = lt_ensure_app_ax_awake(winHit.pid, appId);
 
     AXUIElementRef sys = AXUIElementCreateSystemWide();
     AXUIElementSetMessagingTimeout(sys, 0.25f);
@@ -942,9 +1023,21 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
     AXError err = AXUIElementCopyElementAtPosition(sys, (float)pt.x, (float)pt.y, &hitElem);
     CFRelease(sys);
 
-    // Retry once after 25ms if we just woke up a lazy Chromium/Electron renderer tree!
-    if (err != kAXErrorSuccess || !hitElem) {
-        usleep(25000);
+    // If we just woke up a lazy Chromium/Electron renderer tree, it often returns only a bare AXWindow/AXGroup
+    // for ~40-60ms while its renderer builds the DOM accessibility tree. Retry once after 55ms!
+    bool bareShellOnWake = false;
+    if (justAwakened && err == kAXErrorSuccess && hitElem) {
+        NSString *initialRole = lt_ax_string(hitElem, kAXRoleAttribute) ?: @"";
+        if ([initialRole isEqualToString:@"AXWindow"] || [initialRole isEqualToString:@"AXApplication"]) {
+            bareShellOnWake = true;
+        }
+    }
+    if (err != kAXErrorSuccess || !hitElem || bareShellOnWake) {
+        if (hitElem) {
+            CFRelease(hitElem);
+            hitElem = NULL;
+        }
+        usleep(justAwakened ? 55000 : 25000);
         AXUIElementRef sys2 = AXUIElementCreateSystemWide();
         AXUIElementSetMessagingTimeout(sys2, 0.25f);
         err = AXUIElementCopyElementAtPosition(sys2, (float)pt.x, (float)pt.y, &hitElem);
@@ -974,7 +1067,8 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
     // 2. If direct element didn't resolve a character range, walk up to 4 levels / 24 children by rect!
     if (!hasRange) {
         int budget = 24;
-        AXUIElementRef deepChild = lt_find_deepest_text_child_retained(hitElem, pt, winHit.pid, 1, &budget);
+        pid_t targetPid = elemPid > 0 ? elemPid : winHit.pid;
+        AXUIElementRef deepChild = lt_find_deepest_text_child_retained(hitElem, pt, targetPid, 1, &budget);
         if (deepChild) {
             CFRelease(hitElem);
             hitElem = deepChild;
@@ -1368,44 +1462,123 @@ char *lt_macos_ocr_region_json(double x, double y, double w, double h) {
 }
 
 // ============================================================================
-// Non-Activating NSPanel & Mouse Pass-Through Window Controls
+// Non-Activating Popup Window Controls (Safe Associated-Object Hook, No Isa-Swizzle)
 // ============================================================================
 
-static void lt_apply_nonactivating_panel_class(NSWindow *win) {
-    if (!win) return;
-    Class curCls = object_getClass(win);
-    if ([win isKindOfClass:[LTNonActivatingPanel class]]) return;
+static const char kLTPreventActivationAssocKey = 0;
+static const char kLTGlassBackdropAssocKey = 0;
+static const CGFloat kLTPopupCornerRadius = 16.0;
 
-    // Safely convert or dynamically subclass `curCls` so `_preventsActivation` & `canBecomeKeyWindow = NO` apply
-    if (class_getInstanceSize(curCls) == class_getInstanceSize([LTNonActivatingPanel class])) {
-        object_setClass(win, [LTNonActivatingPanel class]);
-    } else {
-        NSString *subName = [NSString stringWithFormat:@"LTNonActivating_%s", class_getName(curCls)];
-        Class subCls = NSClassFromString(subName);
-        if (!subCls) {
-            subCls = objc_allocateClassPair(curCls, [subName UTF8String], 0);
-            if (subCls) {
-                IMP noImp = imp_implementationWithBlock(^BOOL(id _self) { (void)_self; return NO; });
-                IMP yesImp = imp_implementationWithBlock(^BOOL(id _self) { (void)_self; return YES; });
-                class_addMethod(subCls, @selector(canBecomeKeyWindow), noImp, "c@:");
-                class_addMethod(subCls, @selector(canBecomeMainWindow), noImp, "c@:");
-                class_addMethod(subCls, NSSelectorFromString(@"_preventsActivation"), yesImp, "c@:");
-                objc_registerClassPair(subCls);
-            }
+@protocol LTNativeGlassEffectViewProtocol <NSObject>
+@property (nonatomic) NSInteger style;
+@property (nonatomic) CGFloat cornerRadius;
+@property (nullable, nonatomic, copy) NSColor *tintColor;
+@end
+
+static void lt_attach_native_glass_if_needed(NSWindow *win) {
+    if (!win) return;
+    NSView *rootView = [win contentView];
+    if (!rootView) return;
+
+    NSView *existing = objc_getAssociatedObject(win, &kLTGlassBackdropAssocKey);
+    if (existing && [existing superview] == rootView) {
+        return;
+    }
+
+    // Keep WKWebView transparent and clipped to matching continuous rounded corners
+    NSView *firstWebView = nil;
+    for (NSView *sub in [rootView subviews]) {
+        if (!firstWebView) {
+            firstWebView = sub;
         }
-        if (subCls) {
-            object_setClass(win, subCls);
+        [sub setWantsLayer:YES];
+        if (sub.layer) {
+            sub.layer.cornerRadius = kLTPopupCornerRadius;
+            sub.layer.cornerCurve = kCACornerCurveContinuous;
+            sub.layer.masksToBounds = YES;
+            sub.layer.backgroundColor = [[NSColor clearColor] CGColor];
+        }
+        @try {
+            [sub setValue:@NO forKey:@"drawsBackground"];
+        } @catch (__unused NSException *ex) {}
+    }
+
+    NSView *glassBackdrop = nil;
+    if (@available(macOS 26.0, *)) {
+        Class glassCls = NSClassFromString(@"NSGlassEffectView");
+        if (glassCls) {
+            NSView<LTNativeGlassEffectViewProtocol> *glass =
+                (NSView<LTNativeGlassEffectViewProtocol> *)[[glassCls alloc] initWithFrame:rootView.bounds];
+            glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            glass.style = 0; // NSGlassEffectViewStyleRegular
+            glass.cornerRadius = kLTPopupCornerRadius;
+            // Anchor Liquid Glass luminance to system Light/Dark appearance so WKWebView CSS
+            // text colors always maintain high legibility regardless of what window sits behind.
+            glass.tintColor = [NSColor colorWithName:nil dynamicProvider:^NSColor * _Nonnull(NSAppearance * _Nonnull appearance) {
+                NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
+                    NSAppearanceNameAqua,
+                    NSAppearanceNameDarkAqua
+                ]];
+                if ([match isEqualToString:NSAppearanceNameDarkAqua]) {
+                    return [NSColor colorWithSRGBRed:0.08 green:0.09 blue:0.12 alpha:0.54];
+                }
+                return [NSColor colorWithSRGBRed:0.98 green:0.99 blue:1.0 alpha:0.48];
+            }];
+            glassBackdrop = glass;
         }
     }
+
+    // Automatic fallback for macOS 14 / 15 before Liquid Glass
+    if (!glassBackdrop) {
+        NSVisualEffectView *vfx = [[NSVisualEffectView alloc] initWithFrame:rootView.bounds];
+        vfx.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        vfx.material = NSVisualEffectMaterialPopover;
+        vfx.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        vfx.state = NSVisualEffectStateActive;
+        vfx.wantsLayer = YES;
+        vfx.layer.cornerRadius = kLTPopupCornerRadius;
+        vfx.layer.cornerCurve = kCACornerCurveContinuous;
+        vfx.layer.masksToBounds = YES;
+        glassBackdrop = vfx;
+    }
+
+    if (firstWebView) {
+        [rootView addSubview:glassBackdrop positioned:NSWindowBelow relativeTo:firstWebView];
+    } else {
+        [rootView addSubview:glassBackdrop];
+    }
+    objc_setAssociatedObject(win, &kLTGlassBackdropAssocKey, glassBackdrop, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void lt_install_nonactivating_hooks(NSWindow *win) {
+    if (!win) return;
+    objc_setAssociatedObject(win, &kLTPreventActivationAssocKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class cls = [win class]; // Base window class (e.g. TaoWindow), preserving any KVO subclass
+        SEL preventsSel = NSSelectorFromString(@"_preventsActivation");
+        Method existing = class_getInstanceMethod(cls, preventsSel);
+        BOOL (*origImp)(id, SEL) = existing ? (BOOL (*)(id, SEL))method_getImplementation(existing) : NULL;
+        IMP newImp = imp_implementationWithBlock(^BOOL(id selfObj) {
+            NSNumber *flag = objc_getAssociatedObject(selfObj, &kLTPreventActivationAssocKey);
+            if ([flag boolValue]) return YES;
+            return origImp ? origImp(selfObj, preventsSel) : NO;
+        });
+        if (!class_addMethod(cls, preventsSel, newImp, "c@:")) {
+            Method direct = class_getInstanceMethod(cls, preventsSel);
+            if (direct) method_setImplementation(direct, newImp);
+        }
+    });
 }
 
 void lt_macos_configure_popup_window(void *ns_window_ptr) {
     if (!ns_window_ptr) return;
     NSWindow *win = (__bridge NSWindow *)ns_window_ptr;
     dispatch_async(dispatch_get_main_queue(), ^{
-        lt_apply_nonactivating_panel_class(win);
-        [win setStyleMask:([win styleMask] | NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless)];
+        lt_install_nonactivating_hooks(win);
         if ([win isKindOfClass:[NSPanel class]]) {
+            [win setStyleMask:([win styleMask] | NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless)];
             [(NSPanel *)win setFloatingPanel:YES];
             [(NSPanel *)win setBecomesKeyOnlyIfNeeded:YES];
         }
@@ -1413,13 +1586,14 @@ void lt_macos_configure_popup_window(void *ns_window_ptr) {
         [win setHidesOnDeactivate:NO];
         [win setOpaque:NO];
         [win setBackgroundColor:[NSColor clearColor]];
-        [win setHasShadow:NO];
+        [win setHasShadow:YES];
         [win setAnimationBehavior:NSWindowAnimationBehaviorNone];
         [win setIgnoresMouseEvents:YES];
         [win setCollectionBehavior:(NSWindowCollectionBehaviorCanJoinAllSpaces
                                   | NSWindowCollectionBehaviorFullScreenAuxiliary
                                   | NSWindowCollectionBehaviorIgnoresCycle
                                   | NSWindowCollectionBehaviorTransient)];
+        lt_attach_native_glass_if_needed(win);
         g_PopupWindowNumber = (uint32_t)[win windowNumber];
     });
 }
@@ -1428,8 +1602,24 @@ void lt_macos_present_popup_window(void *ns_window_ptr, double x, double y, doub
     if (!ns_window_ptr) return;
     NSWindow *win = (__bridge NSWindow *)ns_window_ptr;
     dispatch_async(dispatch_get_main_queue(), ^{
+        lt_attach_native_glass_if_needed(win);
         NSRect appKitRect = lt_topleft_rect_to_appkit(x, y, w, h);
-        [win setFrame:appKitRect display:YES animate:NO];
+        NSRect prevFrame = [win frame];
+        bool sizeChanged = (fabs(prevFrame.size.width - appKitRect.size.width) > 0.5 ||
+                            fabs(prevFrame.size.height - appKitRect.size.height) > 0.5);
+        [win setAlphaValue:1.0];
+        if ([win contentView]) {
+            [[win contentView] setHidden:NO];
+            for (NSView *sub in [[win contentView] subviews]) {
+                [sub setHidden:NO];
+            }
+        }
+        if (!NSEqualRects(prevFrame, appKitRect)) {
+            [win setFrame:appKitRect display:YES animate:NO];
+        }
+        if (sizeChanged) {
+            [win invalidateShadow];
+        }
         [win setIgnoresMouseEvents:!interactive];
         [win orderFrontRegardless];
         g_PopupWindowNumber = (uint32_t)[win windowNumber];

@@ -209,12 +209,12 @@ unsafe extern "system" fn keyboard_hook_proc(
                     st.trigger_down = false;
                     st.sentence_mod_down = false;
                     let now = Instant::now();
-                    let valid_tap = DOUBLE_TAP_ENABLED.load(Ordering::Relaxed)
-                        && !st.other_key_during_tap
+                    let clean_tap = !st.other_key_during_tap
                         && st
                             .tap_press_time
                             .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(280))
                         && st.tap_press_point.distance_to(pointer) < 12.0;
+                    let valid_tap = DOUBLE_TAP_ENABLED.load(Ordering::Relaxed) && clean_tap;
 
                     let fire_double_tap = if valid_tap {
                         if st
@@ -233,7 +233,10 @@ unsafe extern "system" fn keyboard_hook_proc(
                     };
                     drop(st);
 
-                    emit_event(PlatformInputEvent::TriggerReleased { pointer });
+                    emit_event(PlatformInputEvent::TriggerReleased {
+                        pointer,
+                        clean_tap,
+                    });
                     if fire_double_tap {
                         emit_event(PlatformInputEvent::DoubleTapSelection { pointer });
                     }
@@ -252,6 +255,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             }
         } else if is_down {
             HOOK_STATE.lock().other_key_during_tap = true;
+            emit_event(PlatformInputEvent::OtherKeyPressed);
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }

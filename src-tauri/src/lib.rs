@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use platform::{create_platform_backend, PermissionsStatus, PlatformBackend, PlatformInputEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use storage::{
@@ -32,8 +33,22 @@ use translation::{
 };
 use uuid::Uuid;
 
-const DEFAULT_POPUP_WIDTH: f64 = 380.0;
-const DEFAULT_POPUP_HEIGHT: f64 = 190.0;
+const DEFAULT_POPUP_WIDTH: f64 = 360.0;
+
+fn estimate_initial_popup_height(card: &PopupCardViewState) -> f64 {
+    let mut h = if card.scope == ExtractionScope::Word {
+        76.0
+    } else {
+        112.0
+    };
+    if let Some(dict) = &card.dictionary {
+        h += (dict.senses.len().min(4) as f64) * 24.0 + 8.0;
+    }
+    if card.interactive {
+        h += 38.0;
+    }
+    h.clamp(60.0, 260.0)
+}
 
 pub struct AppController {
     pub app: AppHandle,
@@ -44,9 +59,26 @@ pub struct AppController {
     pub cache: TranslationCache,
     pub gate: RequestGate,
     pub state: Mutex<CoordinatorStateMachine>,
+    pub trigger_press_count: AtomicU64,
 }
 
 impl AppController {
+    pub fn write_diagnostics(&self, last_event: &str, last_outcome: &str, target_app: Option<&str>) {
+        let perms = self.platform.permissions_status(false);
+        let payload = serde_json::json!({
+            "pid": std::process::id(),
+            "accessibility": perms.accessibility,
+            "screenRecording": perms.screen_recording,
+            "triggerPressCount": self.trigger_press_count.load(Ordering::Relaxed),
+            "lastEvent": last_event,
+            "lastOutcome": last_outcome,
+            "lastTargetApp": target_app,
+        });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
+            let _ = std::fs::write(self.storage.directory().join("Diagnostics.json"), bytes);
+        }
+    }
+
     pub fn emit_popup_state(&self, card: &PopupCardViewState) {
         let _ = self.app.emit_to("popup", "popup://state", card);
     }
@@ -80,13 +112,20 @@ impl AppController {
                     });
                 }
             }
+            PlatformInputEvent::OtherKeyPressed => {
+                let action = self.state.lock().on_other_key_pressed();
+                self.apply_transition(action);
+            }
             PlatformInputEvent::TriggerPressed {
                 sentence_modifier,
                 pointer,
             } => {
+                self.trigger_press_count.fetch_add(1, Ordering::Relaxed);
                 if !settings.enabled {
+                    self.write_diagnostics("triggerPressed", "disabledInSettings", None);
                     return;
                 }
+                self.write_diagnostics("triggerPressed", "dwellArmed", None);
                 let action = self.state.lock().on_trigger_pressed(
                     pointer,
                     sentence_modifier,
@@ -95,11 +134,12 @@ impl AppController {
                 );
                 self.apply_transition(action);
             }
-            PlatformInputEvent::TriggerReleased { pointer } => {
+            PlatformInputEvent::TriggerReleased { pointer, clean_tap } => {
                 let (action, card_opt) = {
                     let mut guard = self.state.lock();
                     let act = guard.on_trigger_released(
                         pointer,
+                        clean_tap,
                         Instant::now(),
                         settings.linger_dismiss_ms,
                     );
@@ -257,13 +297,18 @@ impl AppController {
 
         match extraction {
             Ok(snapshot) => {
+                let outcome_str = format!("ok:{:?}:{:?}", snapshot.source, snapshot.scope);
+                self.write_diagnostics("hoverExtraction", &outcome_str, target_app.as_deref());
                 let force_interactive = snapshot.scope == ExtractionScope::Selection;
                 self.present_and_translate(snapshot, force_interactive).await;
             }
             Err(ExtractionFailure::PermissionDenied) => {
+                self.write_diagnostics("hoverExtraction", "err:PermissionDenied", target_app.as_deref());
                 self.present_status_card(gen, pointer, ExtractionFailure::PermissionDenied.user_message());
             }
-            Err(_) => {
+            Err(other) => {
+                let err_str = format!("err:{:?}", other);
+                self.write_diagnostics("hoverExtraction", &err_str, target_app.as_deref());
                 // Silent miss over blank desktop/margins so normal modifier usage is never noisy
             }
         }
@@ -444,12 +489,13 @@ impl AppController {
         };
 
         let monitor = self.platform.monitor_bounds_at(snapshot.pointer);
+        let initial_h = estimate_initial_popup_height(&initial_card);
         let popup_rect = compute_popup_rect(
             snapshot.anchor_rect,
             snapshot.pointer,
             monitor,
             DEFAULT_POPUP_WIDTH,
-            DEFAULT_POPUP_HEIGHT,
+            initial_h,
         );
 
         let interactive = {
@@ -615,7 +661,7 @@ impl AppController {
     pub fn present_status_card(&self, gen: u64, pointer: ScreenPoint, message: &str) {
         let settings = self.storage.settings();
         let monitor = self.platform.monitor_bounds_at(pointer);
-        let popup_rect = compute_popup_rect(None, pointer, monitor, 320.0, 76.0);
+        let popup_rect = compute_popup_rect(None, pointer, monitor, 320.0, 52.0);
         let card = PopupCardViewState {
             visible: true,
             generation: gen,
@@ -774,16 +820,41 @@ fn popup_save_entry(ctrl: State<'_, Arc<AppController>>) -> Result<String, Strin
 
 #[tauri::command]
 fn popup_resize(height: f64, ctrl: State<'_, Arc<AppController>>) {
-    let clamped_h = height.clamp(68.0, 520.0).round();
+    let clamped_h = height.clamp(44.0, 520.0).round();
     let (maybe_new_rect, interactive) = {
         let mut guard = ctrl.state.lock();
         if !guard.card.visible {
             return;
         }
-        let pointer = guard.pointer;
-        let anchor = guard.active_anchor_rect;
-        let monitor = ctrl.platform.monitor_bounds_at(pointer);
-        let new_rect = compute_popup_rect(anchor, pointer, monitor, DEFAULT_POPUP_WIDTH, clamped_h);
+        if let Some(prev) = guard.popup_rect {
+            if (prev.height - clamped_h).abs() < 0.5 {
+                return;
+            }
+        }
+        let width = guard
+            .popup_rect
+            .map(|r| r.width)
+            .unwrap_or(DEFAULT_POPUP_WIDTH);
+        let new_rect = match (guard.active_anchor_rect, guard.popup_rect, guard.card.pinned) {
+            (Some(anchor), _, false) if anchor.is_valid() => {
+                let anchor_center = ScreenPoint::new(anchor.mid_x(), anchor.mid_y());
+                let monitor = ctrl.platform.monitor_bounds_at(anchor_center);
+                compute_popup_rect(Some(anchor), anchor_center, monitor, width, clamped_h)
+            }
+            (_, Some(prev), _) => {
+                let origin_pt = ScreenPoint::new(prev.mid_x(), prev.min_y());
+                let monitor = ctrl.platform.monitor_bounds_at(origin_pt);
+                let margin = 12.0;
+                let max_y = (monitor.max_y() - margin - clamped_h).max(monitor.min_y() + margin);
+                let y = prev.y.min(max_y).max(monitor.min_y() + margin);
+                ScreenRect::new(prev.x, y.round(), width, clamped_h)
+            }
+            _ => {
+                let pointer = guard.pointer;
+                let monitor = ctrl.platform.monitor_bounds_at(pointer);
+                compute_popup_rect(None, pointer, monitor, width, clamped_h)
+            }
+        };
         guard.popup_rect = Some(new_rect);
         (Some(new_rect), guard.card.interactive)
     };
@@ -1112,6 +1183,12 @@ fn get_permissions_status(
 }
 
 #[tauri::command]
+fn request_screen_recording(ctrl: State<'_, Arc<AppController>>) -> PermissionsStatus {
+    let _ = ctrl.platform.request_screen_recording();
+    ctrl.platform.permissions_status(false)
+}
+
+#[tauri::command]
 fn open_main_tab(tab: String, ctrl: State<'_, Arc<AppController>>) {
     ctrl.open_main_window(&tab);
 }
@@ -1233,7 +1310,9 @@ pub fn run() {
                 cache: TranslationCache::new(512, Duration::from_secs(30 * 60)),
                 gate: RequestGate::new(),
                 state: Mutex::new(CoordinatorStateMachine::new()),
+                trigger_press_count: AtomicU64::new(0),
             });
+            controller.write_diagnostics("startup", "ready", None);
 
             if let Some(popup) = app.get_webview_window("popup") {
                 platform.configure_popup_window(&popup);
@@ -1295,6 +1374,7 @@ pub fn run() {
             import_saved_entries,
             export_saved_entries,
             get_permissions_status,
+            request_screen_recording,
             open_main_tab,
         ])
         .run(tauri::generate_context!())

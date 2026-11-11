@@ -29,6 +29,7 @@ unsafe extern "C" {
     fn lt_macos_focused_app_id() -> *mut c_char;
     fn lt_macos_check_accessibility(prompt: bool) -> bool;
     fn lt_macos_check_screen_recording() -> bool;
+    fn lt_macos_request_screen_recording() -> bool;
     fn lt_macos_write_clipboard(text_utf8: *const c_char) -> bool;
     fn lt_macos_extract_selection_json(
         x: f64,
@@ -60,8 +61,12 @@ extern "C" fn on_native_input_event(json_ptr: *const c_char) {
         return;
     }
     let raw = unsafe { CStr::from_ptr(json_ptr) }.to_string_lossy();
-    let Ok(event) = serde_json::from_str::<PlatformInputEvent>(&raw) else {
-        return;
+    let event = match serde_json::from_str::<PlatformInputEvent>(&raw) {
+        Ok(ev) => ev,
+        Err(err) => {
+            tracing::error!("Failed to parse native input event JSON ({err}): {raw}");
+            return;
+        }
     };
     let cb = INPUT_CALLBACK.lock().clone();
     if let Some(callback) = cb {
@@ -434,6 +439,10 @@ impl PlatformBackend for MacOsPlatform {
                 screen_recording: lt_macos_check_screen_recording(),
             }
         }
+    }
+
+    fn request_screen_recording(&self) -> bool {
+        unsafe { lt_macos_request_screen_recording() }
     }
 
     fn write_clipboard(&self, text: &str) -> Result<(), String> {

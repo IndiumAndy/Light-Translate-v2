@@ -19,6 +19,7 @@ char *lt_macos_focused_app_id(void);
 
 bool lt_macos_check_accessibility(bool prompt);
 bool lt_macos_check_screen_recording(void);
+bool lt_macos_request_screen_recording(void);
 
 bool lt_macos_write_clipboard(const char *text_utf8);
 

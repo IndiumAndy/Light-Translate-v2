@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -10,10 +10,12 @@ import {
   Sparkles,
   TextQuote,
   X,
-  Zap,
 } from "lucide-react";
-import type { ExtractionScope, ExtractionSource, PopupCardViewState } from "../shared/types";
+import type { PopupCardViewState } from "../shared/types";
 import "../styles.css";
+
+const IS_MAC_NATIVE_GLASS =
+  typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
 
 const EMPTY_STATE: PopupCardViewState = {
   visible: false,
@@ -39,31 +41,14 @@ const EMPTY_STATE: PopupCardViewState = {
   ttftMs: null,
 };
 
-function scopeLabel(scope: ExtractionScope, source: ExtractionSource): string {
-  const s =
-    scope === "word"
-      ? "单词"
-      : scope === "sentence"
-        ? "整句"
-        : scope === "selection"
-          ? "选区"
-          : scope === "regionOcr"
-            ? "截图取词"
-            : "短语";
-  const src =
-    source === "ocr"
-      ? " · OCR"
-      : source === "clipboardFallback"
-        ? " · 剪贴板"
-        : "";
-  return `${s}${src}`;
-}
-
 function PopupApp() {
   const [card, setCard] = useState<PopupCardViewState>(EMPTY_STATE);
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const lastHeightRef = useRef<number>(0);
+
+  const isStatusOnly = Boolean(card.statusBanner && !card.originalText);
 
   useEffect(() => {
     invoke<PopupCardViewState>("get_popup_state")
@@ -81,40 +66,64 @@ function PopupApp() {
     };
   }, []);
 
-  // Automatically sync native overlay height to fit content tightly
-  useEffect(() => {
-    if (!containerRef.current || !card.visible) return;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const h = Math.ceil(entry.contentRect.height + 16);
-        invoke("popup_resize", { height: h }).catch(() => {});
+  // Measure intrinsic content height and sync native window height tightly without jitter
+  useLayoutEffect(() => {
+    lastHeightRef.current = 0;
+    if (!card.visible) {
+      return;
+    }
+    const el = contentRef.current;
+    if (!el) return;
+
+    const outerPadding = IS_MAC_NATIVE_GLASS ? 0 : 16;
+    const syncHeight = () => {
+      const measured = Math.ceil(el.getBoundingClientRect().height + outerPadding);
+      if (measured > 0 && Math.abs(measured - lastHeightRef.current) >= 1) {
+        lastHeightRef.current = measured;
+        invoke("popup_resize", { height: measured }).catch(() => {});
       }
+    };
+
+    syncHeight();
+    const observer = new ResizeObserver(() => {
+      syncHeight();
     });
-    observer.observe(containerRef.current);
+    observer.observe(el);
     return () => observer.disconnect();
-  }, [card.visible, card.generation]);
+  }, [card.visible, card.generation, isStatusOnly]);
 
   if (!card.visible) {
     return <div className="w-full h-full bg-transparent" />;
   }
 
+  const shellClassName = IS_MAC_NATIVE_GLASS
+    ? "min-h-screen max-h-screen w-full rounded-[16px] lt-popup-glass-mac overflow-y-auto overflow-x-hidden"
+    : "p-2";
+
+  const innerSurfaceClassName = IS_MAC_NATIVE_GLASS
+    ? "w-full"
+    : "rounded-[16px] lt-popup-glass-fallback overflow-hidden";
+
   // Status-only banner (e.g. permission reminder)
-  if (card.statusBanner && !card.originalText) {
+  if (isStatusOnly) {
     return (
-      <div className="p-2">
-        <div
-          ref={containerRef}
-          className="rounded-xl px-3.5 py-2.5 backdrop-blur-2xl bg-white/92 dark:bg-zinc-900/92 border border-black/[0.08] dark:border-white/[0.12] shadow-lg text-[13px] text-zinc-800 dark:text-zinc-100 flex items-center justify-between gap-2"
-        >
-          <span>{card.statusBanner}</span>
-          <button
-            type="button"
-            aria-label="关闭提示"
-            onClick={() => invoke("popup_dismiss")}
-            className="w-6 h-6 rounded-md flex items-center justify-center text-zinc-500 hover:bg-black/5 dark:hover:bg-white/10"
+      <div className={shellClassName}>
+        <div className={innerSurfaceClassName}>
+          <div
+            ref={contentRef}
+            className="px-3.5 py-2.5 text-[13px] leading-[1.45] text-[var(--lt-ink-primary)] flex items-center justify-between gap-2.5"
           >
-            <X className="w-3.5 h-3.5" />
-          </button>
+            <span className="min-w-0 break-words">{card.statusBanner}</span>
+            <button
+              type="button"
+              title="关闭 (Esc)"
+              aria-label="关闭提示"
+              onClick={() => invoke("popup_dismiss")}
+              className="w-7 h-7 shrink-0 rounded-[8px] inline-flex items-center justify-center text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)] transition-colors cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -141,147 +150,45 @@ function PopupApp() {
   };
 
   const primaryTranslation = card.llmTranslation || card.fastTranslation || "";
-  const showFastFallbackBadge = !card.llmTranslation && !!card.fastTranslation;
+  const hasDictionary = Boolean(card.dictionary && card.dictionary.senses.length > 0);
+  const showTranslationSection = Boolean(
+    primaryTranslation || card.isStreaming || card.translationError
+  );
+  const showTranslationDivider =
+    showTranslationSection && (hasDictionary || card.scope !== "word");
   const canExpandSentence =
     card.scope === "word" &&
     (!!card.contextSentence || card.source === "accessibility" || card.source === "ocr");
 
   return (
-    <div className="p-2">
-      <div
-        ref={containerRef}
-        className="rounded-2xl backdrop-blur-2xl bg-white/92 dark:bg-zinc-900/92 border border-black/[0.09] dark:border-white/[0.13] shadow-[0_12px_36px_rgba(0,0,0,0.18)] text-zinc-900 dark:text-zinc-100 overflow-hidden transition-colors"
-      >
-        {/* Top bar: Scope metadata + Non-activating quick controls */}
-        <div className="px-3.5 pt-2.5 pb-1.5 flex items-center justify-between gap-2 border-b border-black/[0.05] dark:border-white/[0.06]">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[11px] font-medium bg-zinc-900/[0.06] dark:bg-white/[0.10] text-zinc-700 dark:text-zinc-300">
-              {scopeLabel(card.scope, card.source)}
-            </span>
-            {card.completeness === "partial" && card.scope === "sentence" && (
-              <span className="text-[11px] text-amber-700 dark:text-amber-400">
-                片段
-              </span>
-            )}
-            {card.ttftMs !== null && card.ttftMs > 0 && (
-              <span className="text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
-                {card.ttftMs}ms
-              </span>
-            )}
-            {!card.interactive && (
-              <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                松开修饰键可操作
-              </span>
-            )}
-          </div>
-
-          {/* Interactive toolbar (28x28pt minimum desktop hit targets per HIG) */}
-          <div
-            className={`flex items-center gap-1 transition-opacity ${
-              card.interactive ? "opacity-100" : "opacity-55 pointer-events-none"
-            }`}
-          >
-            {canExpandSentence && (
-              <button
-                type="button"
-                title="一键翻译所在整句"
-                aria-label="翻译整句"
-                onClick={() => invoke("popup_expand_sentence")}
-                className="h-7 px-2 rounded-lg text-[11.5px] font-medium inline-flex items-center gap-1 bg-sky-600/12 dark:bg-sky-400/15 text-sky-700 dark:text-sky-300 hover:bg-sky-600/20 dark:hover:bg-sky-400/25 transition-colors cursor-pointer"
-              >
-                <TextQuote className="w-3.5 h-3.5" />
-                <span>译整句</span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              title="AI 语境解析"
-              aria-label="语境解释"
-              onClick={() => invoke("popup_explain")}
-              className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-zinc-600 dark:text-zinc-300 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors cursor-pointer"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              title="复制译文"
-              aria-label="复制译文"
-              onClick={handleCopy}
-              className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-zinc-600 dark:text-zinc-300 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors cursor-pointer"
-            >
-              {copied ? (
-                <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              title="加入生词收藏本"
-              aria-label="收藏词条"
-              onClick={handleSave}
-              className={`w-7 h-7 rounded-lg inline-flex items-center justify-center transition-colors cursor-pointer ${
-                card.saved
-                  ? "text-amber-600 dark:text-amber-400 bg-amber-500/12"
-                  : "text-zinc-600 dark:text-zinc-300 hover:bg-black/[0.06] dark:hover:bg-white/[0.10]"
-              }`}
-            >
-              <Bookmark className="w-3.5 h-3.5" fill={card.saved ? "currentColor" : "none"} />
-            </button>
-
-            <button
-              type="button"
-              title={card.pinned ? "取消固定" : "固定浮窗"}
-              aria-label="固定浮窗"
-              onClick={() => invoke("popup_toggle_pin")}
-              className={`w-7 h-7 rounded-lg inline-flex items-center justify-center transition-colors cursor-pointer ${
-                card.pinned
-                  ? "text-sky-600 dark:text-sky-400 bg-sky-500/15"
-                  : "text-zinc-600 dark:text-zinc-300 hover:bg-black/[0.06] dark:hover:bg-white/[0.10]"
-              }`}
-            >
-              <Pin className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              title="关闭 (Esc)"
-              aria-label="关闭浮窗"
-              onClick={() => invoke("popup_dismiss")}
-              className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-zinc-500 dark:text-zinc-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Main Content Body */}
-        <div className="px-3.5 py-2.5 space-y-2">
-          {/* Source Text */}
+    <div className={shellClassName}>
+      <div className={innerSurfaceClassName}>
+        <div ref={contentRef} className="px-4 py-3">
+          {/* Source Text — immediate focus, zero top header clutter */}
           <div
             className={`select-text break-words ${
               card.scope === "word"
-                ? "text-[16px] font-semibold tracking-tight text-zinc-900 dark:text-zinc-50"
-                : "text-[13px] leading-[1.48] text-zinc-600 dark:text-zinc-300 line-clamp-4"
+                ? "text-[17px] leading-[1.3] font-semibold tracking-[-0.015em] text-[var(--lt-ink-primary)]"
+                : "text-[13px] leading-[1.5] font-normal text-[var(--lt-ink-secondary)] line-clamp-3"
             }`}
           >
             {card.originalText}
           </div>
 
           {/* Tier 1: Instant Offline WordBook (< 5ms) */}
-          {card.dictionary && card.dictionary.senses.length > 0 && (
-            <div className="space-y-1 pt-0.5">
+          {hasDictionary && card.dictionary && (
+            <div className="mt-2 space-y-1">
               {card.dictionary.senses.map((sense, idx) => (
-                <div key={idx} className="flex items-baseline gap-2 text-[13px] leading-[1.45]">
+                <div
+                  key={idx}
+                  className="flex items-baseline gap-2 text-[13.5px] leading-[1.48]"
+                >
                   {sense.partOfSpeech && (
-                    <span className="shrink-0 font-mono text-[11.5px] px-1.5 py-0.2 rounded bg-zinc-900/[0.05] dark:bg-white/[0.08] text-zinc-600 dark:text-zinc-300">
+                    <span className="shrink-0 font-mono text-[11px] font-medium px-1.5 py-[1px] rounded-[5px] bg-[var(--lt-surface-subtle)] text-[var(--lt-ink-secondary)]">
                       {sense.partOfSpeech}
                     </span>
                   )}
-                  <span className="select-text text-zinc-800 dark:text-zinc-100">
+                  <span className="select-text text-[var(--lt-ink-primary)]">
                     {sense.glosses.join("；")}
                   </span>
                 </div>
@@ -290,57 +197,54 @@ function PopupApp() {
           )}
 
           {/* Tier 2 & Tier 3: Fast MT + SSE Streaming LLM Translation */}
-          {(primaryTranslation || card.isStreaming || card.translationError) && (
+          {showTranslationSection && (
             <div
-              className={`${
-                card.dictionary ? "pt-1.5 border-t border-black/[0.06] dark:border-white/[0.07]" : ""
-              }`}
+              className={
+                showTranslationDivider
+                  ? "mt-2 pt-2 border-t border-[var(--lt-hairline)]"
+                  : "mt-1.5"
+              }
             >
-              {showFastFallbackBadge && (
-                <div className="inline-flex items-center gap-1 text-[11px] text-sky-700 dark:text-sky-300 mb-0.5">
-                  <Zap className="w-3 h-3" />
-                  <span>极速直译</span>
-                </div>
-              )}
-
               {primaryTranslation ? (
-                <div className="select-text text-[14px] leading-[1.58] font-normal text-zinc-900 dark:text-zinc-50 break-words whitespace-pre-wrap">
+                <div className="select-text text-[14.5px] leading-[1.58] font-normal text-[var(--lt-ink-primary)] break-words whitespace-pre-wrap">
                   {primaryTranslation}
                   {card.isStreaming && (
-                    <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle bg-sky-500 animate-pulse rounded-xs" />
+                    <span className="inline-block w-[5px] h-[14px] ml-1 align-[-2px] rounded-[2px] bg-[#0A84FF] animate-pulse motion-reduce:animate-none" />
                   )}
                 </div>
               ) : card.isStreaming ? (
-                <div className="flex items-center gap-2 text-[13px] text-zinc-500 dark:text-zinc-400 py-0.5">
-                  <span className="w-2 h-2 rounded-full bg-sky-500 animate-ping" />
-                  <span>正在流式译入…</span>
+                <div className="flex items-center gap-2 text-[13px] text-[var(--lt-ink-muted)] py-0.5 whitespace-nowrap">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#0A84FF] animate-pulse motion-reduce:animate-none" />
+                  <span>翻译中…</span>
                 </div>
               ) : null}
 
               {card.translationError && (
-                <div className="mt-1 text-[12px] text-rose-600 dark:text-rose-400">
+                <div className="mt-1 text-[12px] leading-[1.45] text-rose-600 dark:text-rose-400">
                   {card.translationError}
                 </div>
               )}
             </div>
           )}
 
-          {/* On-Demand Contextual AI Explanation */}
+          {/* On-Demand Contextual AI Explanation (tonal inset, never glass-on-glass) */}
           {(card.isExplaining || card.explanation || card.explanationError) && (
-            <div className="mt-2 rounded-xl px-3 py-2 bg-zinc-900/[0.04] dark:bg-white/[0.05] border border-black/[0.05] dark:border-white/[0.06] space-y-1">
-              <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-sky-500" />
+            <div className="mt-2.5 rounded-[11px] px-3 py-2 bg-[var(--lt-surface-subtle)] space-y-1">
+              <div className="text-[11px] font-medium text-[var(--lt-ink-muted)] flex items-center gap-1 whitespace-nowrap">
+                <Sparkles className="w-3 h-3 text-[#0A84FF]" />
                 <span>AI 语境解析</span>
               </div>
               {card.explanation ? (
-                <div className="select-text text-[12.5px] leading-[1.55] text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap">
+                <div className="select-text text-[13px] leading-[1.56] text-[var(--lt-ink-primary)] whitespace-pre-wrap break-words">
                   {card.explanation}
                   {card.isExplaining && (
-                    <span className="inline-block w-1.5 h-3 ml-0.5 align-middle bg-sky-500 animate-pulse" />
+                    <span className="inline-block w-[5px] h-[12px] ml-1 align-[-1px] rounded-[2px] bg-[#0A84FF] animate-pulse motion-reduce:animate-none" />
                   )}
                 </div>
               ) : card.isExplaining ? (
-                <div className="text-[12px] text-zinc-500 dark:text-zinc-400">正在结合上下文分析…</div>
+                <div className="text-[12px] text-[var(--lt-ink-muted)] whitespace-nowrap">
+                  正在结合上下文分析…
+                </div>
               ) : null}
               {card.explanationError && (
                 <div className="text-[12px] text-rose-600 dark:text-rose-400">
@@ -350,8 +254,103 @@ function PopupApp() {
             </div>
           )}
 
-          {toast && (
-            <div className="text-[11.5px] text-sky-700 dark:text-sky-300 pt-0.5">{toast}</div>
+          {/* On-Demand Bottom Action Bar — hidden while holding modifier, aligned single row on release */}
+          {card.interactive && (
+            <div className="mt-2.5 pt-2 border-t border-[var(--lt-hairline)] flex items-center justify-between gap-2 whitespace-nowrap select-none">
+              <div className="flex items-center gap-2 min-w-0">
+                {canExpandSentence && (
+                  <button
+                    type="button"
+                    title="翻译所在整句"
+                    aria-label="翻译所在整句"
+                    onClick={() => invoke("popup_expand_sentence")}
+                    className="h-7 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 shrink-0 bg-[#007AFF]/[0.12] dark:bg-[#0A84FF]/[0.22] text-[#0062CC] dark:text-[#70BCFF] hover:bg-[#007AFF]/[0.20] dark:hover:bg-[#0A84FF]/[0.32] transition-colors cursor-pointer"
+                  >
+                    <TextQuote className="w-3.5 h-3.5 shrink-0" />
+                    <span>译整句</span>
+                  </button>
+                )}
+                {toast && (
+                  <span className="text-[11.5px] text-[var(--lt-ink-muted)] truncate">
+                    {toast}
+                  </span>
+                )}
+              </div>
+
+              {/* 28x28pt desktop hit targets per Apple HIG */}
+              <div className="flex items-center gap-0.5 shrink-0 ml-auto">
+                <button
+                  type="button"
+                  title="AI 语境解析"
+                  aria-label="AI 语境解析"
+                  onClick={() => invoke("popup_explain")}
+                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center transition-colors cursor-pointer ${
+                    card.isExplaining || card.explanation
+                      ? "text-[#0062CC] dark:text-[#70BCFF] bg-[#007AFF]/[0.12] dark:bg-[#0A84FF]/[0.20]"
+                      : "text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)]"
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  type="button"
+                  title="复制译文"
+                  aria-label="复制译文"
+                  onClick={handleCopy}
+                  className="w-7 h-7 rounded-[8px] inline-flex items-center justify-center text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)] transition-colors cursor-pointer"
+                >
+                  {copied ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  title="收藏词条"
+                  aria-label="收藏词条"
+                  onClick={handleSave}
+                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center transition-colors cursor-pointer ${
+                    card.saved
+                      ? "text-amber-600 dark:text-amber-400 bg-amber-500/[0.14]"
+                      : "text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)]"
+                  }`}
+                >
+                  <Bookmark
+                    className="w-3.5 h-3.5"
+                    fill={card.saved ? "currentColor" : "none"}
+                  />
+                </button>
+
+                <button
+                  type="button"
+                  title={card.pinned ? "取消固定" : "固定浮窗"}
+                  aria-label={card.pinned ? "取消固定" : "固定浮窗"}
+                  onClick={() => invoke("popup_toggle_pin")}
+                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center transition-colors cursor-pointer ${
+                    card.pinned
+                      ? "text-[#0062CC] dark:text-[#70BCFF] bg-[#007AFF]/[0.14] dark:bg-[#0A84FF]/[0.24]"
+                      : "text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)]"
+                  }`}
+                >
+                  <Pin className="w-3.5 h-3.5" />
+                </button>
+
+                {card.pinned && (
+                  <button
+                    type="button"
+                    title="关闭 (Esc)"
+                    aria-label="关闭浮窗"
+                    onClick={() => invoke("popup_dismiss")}
+                    className="w-7 h-7 rounded-[8px] inline-flex items-center justify-center text-[var(--lt-ink-muted)] hover:bg-[var(--lt-control-hover)] transition-colors cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
           )}
         </div>
       </div>

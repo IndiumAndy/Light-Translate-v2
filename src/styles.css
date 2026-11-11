@@ -2,7 +2,24 @@
 
 :root {
   color-scheme: light dark;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --lt-ink-primary: #111318;
+  --lt-ink-secondary: #414754;
+  --lt-ink-muted: #596172;
+  --lt-hairline: rgba(15, 18, 24, 0.08);
+  --lt-surface-subtle: rgba(15, 18, 24, 0.048);
+  --lt-control-hover: rgba(15, 18, 24, 0.072);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --lt-ink-primary: #f5f7fa;
+    --lt-ink-secondary: #c5ccd8;
+    --lt-ink-muted: #9ca6b8;
+    --lt-hairline: rgba(255, 255, 255, 0.095);
+    --lt-surface-subtle: rgba(255, 255, 255, 0.07);
+    --lt-control-hover: rgba(255, 255, 255, 0.115);
+  }
 }
 
 html,
@@ -10,6 +27,62 @@ body {
   margin: 0;
   padding: 0;
   background: transparent;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Native macOS Liquid Glass (NSGlassEffectViewStyleRegular) surface veil + optical rim */
+.lt-popup-glass-mac {
+  background: rgba(255, 255, 255, 0.30);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+@media (prefers-color-scheme: dark) {
+  .lt-popup-glass-mac {
+    background: rgba(14, 16, 22, 0.36);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  }
+}
+
+/* Cross-platform CSS glass fallback for Windows / Linux */
+.lt-popup-glass-fallback {
+  background: rgba(248, 250, 252, 0.80);
+  -webkit-backdrop-filter: blur(28px) saturate(1.45);
+  backdrop-filter: blur(28px) saturate(1.45);
+  box-shadow:
+    0 12px 34px rgba(0, 0, 0, 0.18),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+@media (prefers-color-scheme: dark) {
+  .lt-popup-glass-fallback {
+    background: rgba(20, 22, 28, 0.82);
+    box-shadow:
+      0 14px 36px rgba(0, 0, 0, 0.42),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+      inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  }
+}
+
+/* Accessibility: Increase Contrast fallback */
+@media (prefers-contrast: more) {
+  .lt-popup-glass-mac,
+  .lt-popup-glass-fallback {
+    background: rgba(250, 251, 253, 0.96);
+    box-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, 0.32);
+  }
+}
+
+@media (prefers-color-scheme: dark) and (prefers-contrast: more) {
+  .lt-popup-glass-mac,
+  .lt-popup-glass-fallback {
+    background: rgba(18, 20, 26, 0.96);
+    box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.38);
+  }
 }
 
 /* Custom subtle scrollbars for desktop panels */

@@ -81,7 +81,7 @@ function CaptureApp() {
       className="fixed inset-0 w-screen h-screen cursor-crosshair bg-black/28 select-none"
     >
       {/* Top hint pill */}
-      <div className="fixed top-6 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full backdrop-blur-xl bg-zinc-900/85 text-zinc-100 text-[13px] border border-white/15 shadow-lg pointer-events-none">
+      <div className="fixed top-6 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full backdrop-blur-xl bg-zinc-900/85 text-zinc-100 text-[13px] border border-white/15 shadow-lg pointer-events-none whitespace-nowrap">
         拖拽框选需要识别翻译的区域 · 按 Esc 或右键取消
       </div>
 

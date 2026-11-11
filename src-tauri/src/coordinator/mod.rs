@@ -179,12 +179,18 @@ impl CoordinatorStateMachine {
     /// Releasing the trigger key NEVER cancels an active translation stream!
     /// If a card is currently visible in `HoldingPassThrough`, it transitions smoothly
     /// into `Lingering` (`interactive = true`) while streaming continues uninterrupted.
+    /// In addition, a clean standalone tap (`clean_tap == true`, released before `hover_dwell_ms`
+    /// with no other key/mouse chord) immediately triggers hover/selection extraction at `pointer`.
     pub fn on_trigger_released(
         &mut self,
         pointer: ScreenPoint,
+        clean_tap: bool,
         now: Instant,
         linger_ms: u64,
     ) -> StateTransitionAction {
+        let had_pending_dwell = self.dwell_deadline.is_some();
+        let was_sentence_mod = self.sentence_modifier_held;
+
         self.trigger_held = false;
         self.sentence_modifier_held = false;
         self.pointer = pointer;
@@ -204,8 +210,18 @@ impl CoordinatorStateMachine {
                 }
                 StateTransitionAction::SetPopupInteractive(true)
             }
+            _ if clean_tap && had_pending_dwell => StateTransitionAction::StartHoverExtraction {
+                pointer,
+                sentence_mode: was_sentence_mod,
+            },
             _ => StateTransitionAction::None,
         }
+    }
+
+    pub fn on_other_key_pressed(&mut self) -> StateTransitionAction {
+        self.dwell_anchor = None;
+        self.dwell_deadline = None;
+        StateTransitionAction::None
     }
 
     pub fn on_sentence_modifier_changed(
@@ -480,6 +496,7 @@ mod tests {
         // 3. User IMMEDIATELY releases Option while LLM is still streaming!
         let rel = sm.on_trigger_released(
             ScreenPoint::new(303.0, 204.0),
+            false,
             t0 + Duration::from_millis(200),
             2500,
         );
@@ -534,5 +551,29 @@ mod tests {
             StateTransitionAction::None
         );
         assert!(sm.card.visible);
+    }
+
+    #[test]
+    fn clean_single_tap_triggers_extraction_while_chord_cancels_dwell() {
+        let mut sm = CoordinatorStateMachine::new();
+        let t0 = Instant::now();
+        let pt = ScreenPoint::new(420.0, 310.0);
+
+        // Quick standalone tap (< 150ms dwell) -> starts hover extraction immediately on release!
+        sm.on_trigger_pressed(pt, false, t0, 150);
+        let tap_act = sm.on_trigger_released(pt, true, t0 + Duration::from_millis(75), 2500);
+        assert_eq!(
+            tap_act,
+            StateTransitionAction::StartHoverExtraction {
+                pointer: pt,
+                sentence_mode: false
+            }
+        );
+
+        // Option+Key chord (`on_other_key_pressed` before release) -> never false-triggers!
+        sm.on_trigger_pressed(pt, false, t0 + Duration::from_millis(500), 150);
+        sm.on_other_key_pressed();
+        let chord_act = sm.on_trigger_released(pt, false, t0 + Duration::from_millis(580), 2500);
+        assert_eq!(chord_act, StateTransitionAction::None);
     }
 }

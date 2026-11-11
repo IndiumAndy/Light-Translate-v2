@@ -110,13 +110,31 @@ function MainApp() {
       setManualError(p.error);
     });
 
+    const onFocus = () => {
+      invoke<PermissionsStatus>("get_permissions_status", { prompt: false })
+        .then(setPermissions)
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+
     return () => {
+      window.removeEventListener("focus", onFocus);
       unlistenNav.then((f) => f());
       unlistenSettings.then((f) => f());
       unlistenWordbook.then((f) => f());
       unlistenManual.then((f) => f());
     };
   }, []);
+
+  useEffect(() => {
+    if (tab !== "settings") return;
+    const timer = window.setInterval(() => {
+      invoke<PermissionsStatus>("get_permissions_status", { prompt: false })
+        .then(setPermissions)
+        .catch(() => {});
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [tab]);
 
   const runManualTranslate = async () => {
     const trimmed = inputText.trim();
@@ -663,15 +681,20 @@ function MainApp() {
                       <div className="font-medium text-[13px]">屏幕录制 (Screen Recording)</div>
                       <div className="text-[11.5px] text-zinc-500">用于 PDF/图片离线 Vision OCR 兜底</div>
                     </div>
-                    <span
-                      className={`text-[12px] font-medium ${
-                        permissions.screenRecording
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : "text-amber-600 dark:text-amber-400"
-                      }`}
-                    >
-                      {permissions.screenRecording ? "已就绪" : "未授权"}
-                    </span>
+                    {permissions.screenRecording ? (
+                      <span className="text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const p = await invoke<PermissionsStatus>("request_screen_recording");
+                          setPermissions(p);
+                        }}
+                        className="h-7 px-2.5 rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
+                      >
+                        请求授权
+                      </button>
+                    )}
                   </div>
                 </div>
               </section>
