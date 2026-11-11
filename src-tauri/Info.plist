@@ -6,5 +6,7 @@
   <true/>
   <key>NSAppleEventsUsageDescription</key>
   <string>Light Translate reads hovered or selected text on demand when you hold your trigger key.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Light Translate captures a screen region you select so it can recognize that text on device and translate it.</string>
 </dict>
 </plist>

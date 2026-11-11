@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "popup-window",
+  "description": "Hover card. Listens for popup state and calls its own commands. No window, menu, tray, or path plugin access.",
+  "windows": ["popup"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

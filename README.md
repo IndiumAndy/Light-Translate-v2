@@ -41,3 +41,15 @@ export CARGO_TARGET_DIR="$HOME/Library/Caches/LightTranslateV2/target"
 ```
 
 这是环境变量，不会进仓库，CI 和其他机器仍使用默认的 `src-tauri/target`。
+
+## macOS 私钥有 API 与分发
+
+不抢焦点的浮窗依赖两处私有行为，不要删：
+
+- `tauri.conf.json` 的 `macOSPrivateApi`
+- `src-tauri/native/macos_bridge.m` 里的 `LTNonActivatingPanel`，以及装到窗口类上的 `_preventsActivation`
+
+后果：
+
+- **不能上 Mac App Store。** 审核不接受私有 API。
+- **Developer ID 公证不保证通过。** 公证扫描可能标出 `_preventsActivation`。用当前打包产物跑一次 `notarytool` 才能知道结果。去掉这两处不能换来上架，浮窗会抢走当前应用的焦点。

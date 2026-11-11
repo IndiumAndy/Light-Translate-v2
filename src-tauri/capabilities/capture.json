@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "capture-window",
+  "description": "Region capture overlay. Listens for the capture rect and calls submit or cancel. No window-control APIs.",
+  "windows": ["capture"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}
