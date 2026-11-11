@@ -1,0 +1,15 @@
+# Dependencies & build outputs
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# OS & editor files
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Env & local secrets
+.env
+.env.*

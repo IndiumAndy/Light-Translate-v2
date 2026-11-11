@@ -1,0 +1,3 @@
+[build]
+# Redirect target artifacts outside Desktop to avoid iCloud Drive sync and macOS FinderInfo code-signing pollution.
+target-dir = "/Users/atat/Library/Caches/LightTranslateV2/target"
