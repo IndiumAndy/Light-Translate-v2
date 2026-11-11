@@ -25,3 +25,19 @@ pnpm build
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri dev
 ```
+
+Rust 版本由仓库根目录的 `rust-toolchain.toml` 固定为 **1.90.0**。当前依赖里的 Tauri 2.12 要求 rustc 1.90 或更高。本机装了 rustup 时，在仓库目录里执行 cargo 会自动用这个版本。
+
+### 本机构建缓存（可选）
+
+`.cargo/config.toml` 不设置 `target-dir`。以前写死的 `/Users/atat/Library/Caches/LightTranslateV2/target` 在 GitHub 的 Ubuntu runner 上不存在，Rust 测试会马上失败。
+
+不设置时，编译产物在 `src-tauri/target`（已在 `.gitignore` 中）。
+
+如果仓库放在会同步的 macOS 目录里，希望把产物留在本机缓存，避开 iCloud 同步以及 Finder 给文件加上的信息导致代码签名出问题，只在自己的 shell 里导出：
+
+```bash
+export CARGO_TARGET_DIR="$HOME/Library/Caches/LightTranslateV2/target"
+```
+
+这是环境变量，不会进仓库，CI 和其他机器仍使用默认的 `src-tauri/target`。
