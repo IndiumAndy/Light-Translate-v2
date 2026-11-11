@@ -15,7 +15,9 @@ use extraction::{
     ExtractionSnapshot, ScreenPoint, ScreenRect,
 };
 use parking_lot::Mutex;
-use platform::{create_platform_backend, PermissionsStatus, PlatformBackend, PlatformInputEvent};
+use platform::{
+    create_platform_backend, PermissionsStatus, PlatformBackend, PlatformInputEvent, ShortcutSpec,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,6 +52,16 @@ fn estimate_initial_popup_height(card: &PopupCardViewState) -> f64 {
     h.clamp(60.0, 260.0)
 }
 
+fn format_capture_tray_label(capture_shortcut: &str) -> String {
+    match ShortcutSpec::parse(capture_shortcut) {
+        Some(spec) => format!(
+            "框选截图翻译 ({})",
+            spec.format_display(cfg!(target_os = "macos"))
+        ),
+        None => "框选截图翻译".into(),
+    }
+}
+
 pub struct AppController {
     pub app: AppHandle,
     pub platform: Arc<dyn PlatformBackend>,
@@ -60,9 +72,19 @@ pub struct AppController {
     pub gate: RequestGate,
     pub state: Mutex<CoordinatorStateMachine>,
     pub trigger_press_count: AtomicU64,
+    pub tray_toggle_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    pub tray_capture_item: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
 
 impl AppController {
+    pub fn sync_tray_items(&self, settings: &AppSettings) {
+        if let Some(toggle) = self.tray_toggle_item.lock().as_ref() {
+            let _ = toggle.set_checked(settings.enabled);
+        }
+        if let Some(capture) = self.tray_capture_item.lock().as_ref() {
+            let _ = capture.set_text(format_capture_tray_label(&settings.capture_shortcut));
+        }
+    }
     pub fn write_diagnostics(&self, last_event: &str, last_outcome: &str, target_app: Option<&str>) {
         let perms = self.platform.permissions_status(false);
         let payload = serde_json::json!({
@@ -135,17 +157,24 @@ impl AppController {
                 self.apply_transition(action);
             }
             PlatformInputEvent::TriggerReleased { pointer, clean_tap } => {
-                let (action, card_opt) = {
+                let (action, card_opt, cancel_inflight_hover) = {
                     let mut guard = self.state.lock();
                     let act = guard.on_trigger_released(
                         pointer,
                         clean_tap,
                         Instant::now(),
+                        settings.dismiss_on_trigger_release,
                         settings.linger_dismiss_ms,
                     );
                     let updated_card = guard.card.visible.then(|| guard.card.clone());
-                    (act, updated_card)
+                    let cancel_inflight = settings.dismiss_on_trigger_release
+                        && matches!(act, StateTransitionAction::None)
+                        && !guard.card.visible;
+                    (act, updated_card, cancel_inflight)
                 };
+                if cancel_inflight_hover {
+                    self.gate.invalidate();
+                }
                 self.apply_transition(action);
                 if let Some(card) = card_opt {
                     self.emit_popup_state(&card);
@@ -299,7 +328,8 @@ impl AppController {
             Ok(snapshot) => {
                 let outcome_str = format!("ok:{:?}:{:?}", snapshot.source, snapshot.scope);
                 self.write_diagnostics("hoverExtraction", &outcome_str, target_app.as_deref());
-                let force_interactive = snapshot.scope == ExtractionScope::Selection;
+                let force_interactive = !settings.dismiss_on_trigger_release
+                    && snapshot.scope == ExtractionScope::Selection;
                 self.present_and_translate(snapshot, force_interactive).await;
             }
             Err(ExtractionFailure::PermissionDenied) => {
@@ -315,7 +345,7 @@ impl AppController {
     }
 
     pub async fn expand_current_card_to_sentence(self: &Arc<Self>) {
-        let (maybe_ctx, pointer, anchor_rect, source) = {
+        let (maybe_ctx, pointer, anchor_rect, source, trigger_held) = {
             let guard = self.state.lock();
             if !guard.card.visible {
                 return;
@@ -325,6 +355,7 @@ impl AppController {
                 guard.pointer,
                 guard.active_anchor_rect,
                 guard.card.source,
+                guard.trigger_held,
             )
         };
 
@@ -342,7 +373,9 @@ impl AppController {
                 pointer,
                 app_id: None,
             };
-            self.present_and_translate(snapshot, true).await;
+            let force_interactive =
+                !trigger_held || !self.storage.settings().dismiss_on_trigger_release;
+            self.present_and_translate(snapshot, force_interactive).await;
         } else {
             // Re-extract in sentence mode if no cached sentence context was attached
             self.run_hover_flow(pointer, true).await;
@@ -500,6 +533,9 @@ impl AppController {
 
         let interactive = {
             let mut guard = self.state.lock();
+            if !force_interactive && settings.dismiss_on_trigger_release && !guard.trigger_held {
+                return;
+            }
             guard.present_card(
                 initial_card,
                 snapshot.anchor_rect,
@@ -930,9 +966,20 @@ fn save_settings(
     ctrl: State<'_, Arc<AppController>>,
 ) -> Result<AppSettings, String> {
     let saved = ctrl.storage.update_settings(settings)?;
-    ctrl.platform
-        .update_trigger_config(saved.trigger_modifier, saved.double_tap_selection);
+    ctrl.platform.update_trigger_config(
+        saved.trigger_modifier,
+        saved.double_tap_selection,
+        &saved.selection_shortcut,
+        &saved.capture_shortcut,
+    );
+    ctrl.sync_tray_items(&saved);
+    let _ = ctrl.app.emit("settings://changed", &saved);
     Ok(saved)
+}
+
+#[tauri::command]
+fn set_shortcut_recording(active: bool, ctrl: State<'_, Arc<AppController>>) {
+    ctrl.platform.set_shortcut_recording(active);
 }
 
 #[tauri::command]
@@ -1198,27 +1245,25 @@ fn open_main_tab(tab: String, ctrl: State<'_, Arc<AppController>>) {
 // ============================================================================
 
 fn setup_tray(app: &AppHandle, ctrl: &Arc<AppController>) -> tauri::Result<()> {
-    let initial_enabled = ctrl.storage.settings().enabled;
+    let initial_settings = ctrl.storage.settings();
     let toggle_item = CheckMenuItem::with_id(
         app,
         "toggle_enabled",
         "启用取词与快捷键翻译",
         true,
-        initial_enabled,
+        initial_settings.enabled,
         None::<&str>,
     )?;
     let manual_item = MenuItem::with_id(app, "open_translate", "手动对照翻译…", true, None::<&str>)?;
     let capture_item = MenuItem::with_id(
         app,
         "trigger_capture",
-        if cfg!(target_os = "macos") {
-            "框选截图翻译 (⌃⌘S)"
-        } else {
-            "框选截图翻译 (Alt+Shift+S)"
-        },
+        format_capture_tray_label(&initial_settings.capture_shortcut),
         true,
         None::<&str>,
     )?;
+    *ctrl.tray_toggle_item.lock() = Some(toggle_item.clone());
+    *ctrl.tray_capture_item.lock() = Some(capture_item.clone());
     let wordbook_item = MenuItem::with_id(app, "open_wordbook", "生词收藏本…", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "open_settings", "偏好设置…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit_app", "退出 Light Translate", true, None::<&str>)?;
@@ -1299,7 +1344,12 @@ pub fn run() {
             let storage = AppStorage::open_default();
             let settings = storage.settings();
 
-            platform.update_trigger_config(settings.trigger_modifier, settings.double_tap_selection);
+            platform.update_trigger_config(
+                settings.trigger_modifier,
+                settings.double_tap_selection,
+                &settings.selection_shortcut,
+                &settings.capture_shortcut,
+            );
 
             let controller = Arc::new(AppController {
                 app: app.handle().clone(),
@@ -1311,6 +1361,8 @@ pub fn run() {
                 gate: RequestGate::new(),
                 state: Mutex::new(CoordinatorStateMachine::new()),
                 trigger_press_count: AtomicU64::new(0),
+                tray_toggle_item: Mutex::new(None),
+                tray_capture_item: Mutex::new(None),
             });
             controller.write_diagnostics("startup", "ready", None);
 
@@ -1364,6 +1416,7 @@ pub fn run() {
             submit_region_capture,
             get_settings,
             save_settings,
+            set_shortcut_recording,
             get_api_key_status,
             set_api_key,
             test_provider_connection,

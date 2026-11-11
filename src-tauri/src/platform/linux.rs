@@ -114,7 +114,14 @@ impl PlatformBackend for LinuxPlatform {
         *self.callback.lock() = Some(callback);
     }
 
-    fn update_trigger_config(&self, _modifier: TriggerModifier, _double_tap_selection: bool) {}
+    fn update_trigger_config(
+        &self,
+        _modifier: TriggerModifier,
+        _double_tap_selection: bool,
+        _selection_shortcut: &str,
+        _capture_shortcut: &str,
+    ) {
+    }
 
     fn current_pointer(&self) -> ScreenPoint {
         if let Ok((conn, screen_num)) = RustConnection::connect(None) {

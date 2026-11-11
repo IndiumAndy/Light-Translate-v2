@@ -34,6 +34,7 @@ pub struct AppSettings {
     pub enabled: bool,
     pub trigger_modifier: TriggerModifier,
     pub hover_dwell_ms: u64,
+    pub dismiss_on_trigger_release: bool,
     pub linger_dismiss_ms: u64,
     pub debounce_radius_pt: f64,
     pub double_tap_selection: bool,
@@ -59,6 +60,7 @@ impl Default for AppSettings {
             enabled: true,
             trigger_modifier: TriggerModifier::AltOrOption,
             hover_dwell_ms: 150,
+            dismiss_on_trigger_release: true,
             linger_dismiss_ms: 2500,
             debounce_radius_pt: 8.0,
             double_tap_selection: true,
@@ -454,10 +456,16 @@ mod tests {
         let store = AppStorage::open_in(temp_dir.clone());
 
         let mut settings = store.settings();
+        assert!(settings.dismiss_on_trigger_release);
         assert!(!settings.enable_clipboard_fallback);
         assert!(settings.enable_ocr_fallback);
         settings.hover_dwell_ms = 180;
         store.update_settings(settings).unwrap();
+
+        // Older Settings.json missing `dismissOnTriggerRelease` must default to true
+        let legacy_settings: AppSettings =
+            serde_json::from_str(r#"{"lingerDismissMs":2500,"hoverDwellMs":150}"#).unwrap();
+        assert!(legacy_settings.dismiss_on_trigger_release);
 
         let reopened = AppStorage::open_in(temp_dir.clone());
         assert_eq!(reopened.settings().hover_dwell_ms, 180);

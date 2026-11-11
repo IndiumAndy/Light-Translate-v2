@@ -9,15 +9,18 @@ import {
   Copy,
   Crop,
   Download,
+  Keyboard,
   KeyRound,
   Languages,
   Plus,
+  RotateCcw,
   Search,
   Settings2,
   ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
+  X,
   Zap,
 } from "lucide-react";
 import type {
@@ -34,6 +37,145 @@ import type {
 import "../styles.css";
 
 type ActiveTab = "translate" | "wordbook" | "settings";
+type ShortcutTarget = "capture" | "selection";
+
+const CODE_TO_KEY_TOKEN: Record<string, string> = {
+  Space: "Space",
+  Backquote: "`",
+  Minus: "-",
+  Equal: "=",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Backslash: "\\",
+  Semicolon: ";",
+  Quote: "'",
+  Comma: ",",
+  Period: ".",
+  Slash: "/",
+};
+
+function parseShortcutKeycaps(raw: string, isMac: boolean): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  let ctrl = false;
+  let alt = false;
+  let shift = false;
+  let meta = false;
+  let keyLabel = "";
+
+  for (const part of trimmed.split("+").map((s) => s.trim()).filter(Boolean)) {
+    const lower = part.toLowerCase();
+    if (lower === "control" || lower === "ctrl" || lower === "⌃") ctrl = true;
+    else if (lower === "alt" || lower === "option" || lower === "opt" || lower === "⌥") alt = true;
+    else if (lower === "shift" || lower === "⇧") shift = true;
+    else if (lower === "command" || lower === "cmd" || lower === "meta" || lower === "super" || lower === "win" || lower === "⌘") meta = true;
+    else if (lower === "space") keyLabel = "Space";
+    else if (lower === "grave" || lower === "backquote") keyLabel = "`";
+    else if (lower === "minus") keyLabel = "-";
+    else if (lower === "equal") keyLabel = "=";
+    else if (lower === "bracketleft") keyLabel = "[";
+    else if (lower === "bracketright") keyLabel = "]";
+    else if (lower === "backslash") keyLabel = "\\";
+    else if (lower === "semicolon") keyLabel = ";";
+    else if (lower === "quote") keyLabel = "'";
+    else if (lower === "comma") keyLabel = ",";
+    else if (lower === "period") keyLabel = ".";
+    else if (lower === "slash") keyLabel = "/";
+    else keyLabel = part.length === 1 ? part.toUpperCase() : part.toUpperCase();
+  }
+
+  if (!keyLabel) return [];
+  const caps: string[] = [];
+  if (isMac) {
+    if (ctrl) caps.push("⌃");
+    if (alt) caps.push("⌥");
+    if (shift) caps.push("⇧");
+    if (meta) caps.push("⌘");
+  } else {
+    if (ctrl) caps.push("Ctrl");
+    if (alt) caps.push("Alt");
+    if (shift) caps.push("Shift");
+    if (meta) caps.push("Win");
+  }
+  caps.push(keyLabel);
+  return caps;
+}
+
+function formatShortcutInline(raw: string, isMac: boolean): string {
+  const caps = parseShortcutKeycaps(raw, isMac);
+  if (caps.length === 0) return "";
+  return isMac ? caps.join("") : caps.join("+");
+}
+
+function extractShortcutFromEvent(
+  e: KeyboardEvent,
+  isMac: boolean
+): { canonical: string | null; previewMods: string[]; error?: string } {
+  const previewMods: string[] = [];
+  if (isMac) {
+    if (e.ctrlKey) previewMods.push("⌃");
+    if (e.altKey) previewMods.push("⌥");
+    if (e.shiftKey) previewMods.push("⇧");
+    if (e.metaKey) previewMods.push("⌘");
+  } else {
+    if (e.ctrlKey) previewMods.push("Ctrl");
+    if (e.altKey) previewMods.push("Alt");
+    if (e.shiftKey) previewMods.push("Shift");
+    if (e.metaKey) previewMods.push("Win");
+  }
+
+  const code = e.code;
+  if (
+    code === "MetaLeft" ||
+    code === "MetaRight" ||
+    code === "ControlLeft" ||
+    code === "ControlRight" ||
+    code === "AltLeft" ||
+    code === "AltRight" ||
+    code === "ShiftLeft" ||
+    code === "ShiftRight"
+  ) {
+    return { canonical: null, previewMods };
+  }
+
+  let keyToken: string | null = null;
+  if (code.startsWith("Key") && code.length === 4) {
+    keyToken = code.slice(3).toUpperCase();
+  } else if (code.startsWith("Digit") && code.length === 6) {
+    keyToken = code.slice(5);
+  } else if (/^F([1-9]|1[0-2])$/.test(code)) {
+    keyToken = code;
+  } else if (CODE_TO_KEY_TOKEN[code]) {
+    keyToken = CODE_TO_KEY_TOKEN[code];
+  }
+
+  if (!keyToken) {
+    return {
+      canonical: null,
+      previewMods,
+      error: "支持字母 A–Z、数字 0–9、F1–F12、空格及常用标点键",
+    };
+  }
+
+  const isFnKey = /^F([1-9]|1[0-2])$/.test(keyToken);
+  if (!e.ctrlKey && !e.altKey && !e.metaKey && !isFnKey) {
+    return {
+      canonical: null,
+      previewMods,
+      error: isMac
+        ? "请至少搭配 ⌘ / ⌃ / ⌥ 修饰键（或直接使用 F1–F12）"
+        : "请至少搭配 Ctrl / Alt / Win 修饰键（或直接使用 F1–F12）",
+    };
+  }
+
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push("Control");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  if (e.metaKey) parts.push("Command");
+  parts.push(keyToken);
+  return { canonical: parts.join("+"), previewMods };
+}
 
 function MainApp() {
   const [tab, setTab] = useState<ActiveTab>("translate");
@@ -65,6 +207,15 @@ function MainApp() {
   const [testingConn, setTestingConn] = useState(false);
   const [newExcludedApp, setNewExcludedApp] = useState("");
   const [settingsSavedBanner, setSettingsSavedBanner] = useState(false);
+  const [recordingTarget, setRecordingTarget] = useState<ShortcutTarget | null>(null);
+  const [recordingModsPreview, setRecordingModsPreview] = useState<string[]>([]);
+  const [shortcutHint, setShortcutHint] = useState<string | null>(null);
+
+  const isMac =
+    permissions?.platform === "macos" ||
+    (typeof navigator !== "undefined" && navigator.userAgent.includes("Mac"));
+  const defaultCaptureShortcut = isMac ? "Control+Command+S" : "Alt+Shift+S";
+  const defaultSelectionShortcut = isMac ? "Alt+Command+T" : "Alt+Shift+T";
 
   const refreshAll = async () => {
     const [s, p, ks, list] = await Promise.all([
@@ -127,7 +278,10 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
-    if (tab !== "settings") return;
+    if (tab !== "settings") {
+      setRecordingTarget(null);
+      return;
+    }
     const timer = window.setInterval(() => {
       invoke<PermissionsStatus>("get_permissions_status", { prompt: false })
         .then(setPermissions)
@@ -135,6 +289,98 @@ function MainApp() {
     }, 2500);
     return () => window.clearInterval(timer);
   }, [tab]);
+
+  useEffect(() => {
+    invoke("set_shortcut_recording", { active: recordingTarget !== null }).catch(() => {});
+    if (!recordingTarget || !settings) {
+      setRecordingModsPreview([]);
+      return;
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.code === "Escape") {
+        setRecordingTarget(null);
+        setRecordingModsPreview([]);
+        setShortcutHint(null);
+        return;
+      }
+
+      if (
+        (e.code === "Backspace" || e.code === "Delete") &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.shiftKey
+      ) {
+        const next: AppSettings =
+          recordingTarget === "capture"
+            ? { ...settings, captureShortcut: "" }
+            : { ...settings, selectionShortcut: "" };
+        setRecordingTarget(null);
+        setRecordingModsPreview([]);
+        setShortcutHint(null);
+        persistSettings(next).catch(() => {});
+        return;
+      }
+
+      const parsed = extractShortcutFromEvent(e, isMac);
+      setRecordingModsPreview(parsed.previewMods);
+      if (parsed.error) {
+        setShortcutHint(parsed.error);
+        return;
+      }
+      if (!parsed.canonical) {
+        return;
+      }
+
+      const otherBound =
+        recordingTarget === "capture" ? settings.selectionShortcut : settings.captureShortcut;
+      if (
+        otherBound &&
+        formatShortcutInline(otherBound, isMac) === formatShortcutInline(parsed.canonical, isMac)
+      ) {
+        setShortcutHint(
+          recordingTarget === "capture"
+            ? "该快捷键已绑定给「划词选区翻译」，请换一个组合"
+            : "该快捷键已绑定给「框选截图翻译」，请换一个组合"
+        );
+        return;
+      }
+
+      const next: AppSettings =
+        recordingTarget === "capture"
+          ? { ...settings, captureShortcut: parsed.canonical }
+          : { ...settings, selectionShortcut: parsed.canonical };
+      setRecordingTarget(null);
+      setRecordingModsPreview([]);
+      setShortcutHint(null);
+      persistSettings(next).catch(() => {});
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const parsed = extractShortcutFromEvent(e, isMac);
+      setRecordingModsPreview(parsed.previewMods);
+    };
+
+    const onBlur = () => {
+      setRecordingTarget(null);
+      setRecordingModsPreview([]);
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onBlur);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onBlur);
+      invoke("set_shortcut_recording", { active: false }).catch(() => {});
+    };
+  }, [recordingTarget, settings, isMac]);
 
   const runManualTranslate = async () => {
     const trimmed = inputText.trim();
@@ -346,10 +592,17 @@ function MainApp() {
           <button
             type="button"
             onClick={() => invoke("start_region_capture")}
-            className="w-full h-9 px-3 rounded-lg border border-zinc-300/80 dark:border-zinc-700/80 bg-white/70 dark:bg-zinc-800/70 hover:bg-white dark:hover:bg-zinc-800 flex items-center justify-center gap-2 text-[12.5px] font-medium cursor-pointer transition-colors"
+            className="w-full h-9 px-3 rounded-lg border border-zinc-300/80 dark:border-zinc-700/80 bg-white/70 dark:bg-zinc-800/70 hover:bg-white dark:hover:bg-zinc-800 flex items-center justify-between gap-2 text-[12.5px] font-medium cursor-pointer transition-colors whitespace-nowrap"
           >
-            <Crop className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-            <span>框选截图翻译</span>
+            <span className="inline-flex items-center gap-2 shrink-0">
+              <Crop className="w-3.5 h-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+              <span>框选截图翻译</span>
+            </span>
+            {settings?.captureShortcut && formatShortcutInline(settings.captureShortcut, isMac) && (
+              <kbd className="px-1.5 py-0.5 rounded bg-zinc-200/75 dark:bg-zinc-700/80 text-[11px] font-sans text-zinc-600 dark:text-zinc-300 shrink-0 tabular-nums">
+                {formatShortcutInline(settings.captureShortcut, isMac)}
+              </kbd>
+            )}
           </button>
 
           {needsPermWarning && (
@@ -368,18 +621,18 @@ function MainApp() {
       <main className="flex-1 overflow-y-auto p-6">
         {tab === "translate" && (
           <div className="max-w-3xl mx-auto space-y-5">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
                 <h1 className="text-[18px] font-semibold tracking-tight">手动对照翻译</h1>
                 <p className="text-[12.5px] text-zinc-500 dark:text-zinc-400">
                   支持离线词典秒查、百毫秒极速机翻与大模型 SSE 实时流式译入
                 </p>
               </div>
-              <div className="inline-flex rounded-lg p-0.5 bg-zinc-200/75 dark:bg-zinc-800">
+              <div className="inline-flex shrink-0 rounded-lg p-0.5 bg-zinc-200/75 dark:bg-zinc-800">
                 <button
                   type="button"
                   onClick={() => setManualMode("selection")}
-                  className={`px-3 py-1 rounded-md text-[12.5px] font-medium cursor-pointer ${
+                  className={`px-3 py-1 rounded-md text-[12.5px] font-medium whitespace-nowrap cursor-pointer ${
                     manualMode === "selection"
                       ? "bg-white dark:bg-zinc-900 shadow-xs text-zinc-900 dark:text-zinc-100"
                       : "text-zinc-600 dark:text-zinc-400"
@@ -390,7 +643,7 @@ function MainApp() {
                 <button
                   type="button"
                   onClick={() => setManualMode("explanation")}
-                  className={`px-3 py-1 rounded-md text-[12.5px] font-medium cursor-pointer ${
+                  className={`px-3 py-1 rounded-md text-[12.5px] font-medium whitespace-nowrap cursor-pointer ${
                     manualMode === "explanation"
                       ? "bg-white dark:bg-zinc-900 shadow-xs text-zinc-900 dark:text-zinc-100"
                       : "text-zinc-600 dark:text-zinc-400"
@@ -415,11 +668,11 @@ function MainApp() {
                 placeholder="输入或粘贴英文 / 中文段落（按 ⌘/Ctrl + Enter 立即流式翻译）…"
                 className="w-full p-4 bg-transparent resize-none focus:outline-none text-[14px] leading-relaxed select-text"
               />
-              <div className="px-4 py-2.5 bg-zinc-50 dark:bg-zinc-900/60 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
-                <span className="text-[11.5px] text-zinc-500 tabular-nums">
+              <div className="px-4 py-2.5 bg-zinc-50 dark:bg-zinc-900/60 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between gap-3">
+                <span className="text-[11.5px] text-zinc-500 tabular-nums whitespace-nowrap">
                   {inputText.length} / 5000 字符
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   {inputText && (
                     <button
                       type="button"
@@ -430,7 +683,7 @@ function MainApp() {
                         setManualLlm("");
                         setManualError(null);
                       }}
-                      className="h-8 px-3 rounded-lg text-[12.5px] text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+                      className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg text-[12.5px] text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
                     >
                       清空
                     </button>
@@ -439,12 +692,12 @@ function MainApp() {
                     type="button"
                     onClick={runManualTranslate}
                     disabled={!inputText.trim() || manualStreaming}
-                    className="h-8 px-4 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-[12.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    className="h-8 px-4 shrink-0 whitespace-nowrap rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-[12.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
                     {manualMode === "explanation" ? (
-                      <Sparkles className="w-3.5 h-3.5" />
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
                     ) : (
-                      <Languages className="w-3.5 h-3.5" />
+                      <Languages className="w-3.5 h-3.5 shrink-0" />
                     )}
                     <span>{manualStreaming ? "生成中…" : manualMode === "explanation" ? "解析语境" : "立即翻译"}</span>
                   </button>
@@ -454,16 +707,16 @@ function MainApp() {
 
             {(manualDict || manualFast || manualLlm || manualStreaming || manualError) && (
               <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-[12px] text-zinc-500 dark:text-zinc-400">
-                    <span>译文结果</span>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-[12px] text-zinc-500 dark:text-zinc-400 min-w-0">
+                    <span className="whitespace-nowrap">译文结果</span>
                     {manualTtft !== null && (
-                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 tabular-nums">
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 tabular-nums whitespace-nowrap">
                         首字 {manualTtft}ms
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={async () => {
@@ -473,9 +726,9 @@ function MainApp() {
                         setManualCopied(true);
                         setTimeout(() => setManualCopied(false), 1400);
                       }}
-                      className="h-7 px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[12px] inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                      className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 text-[12px] inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
                     >
-                      {manualCopied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                      {manualCopied ? <Check className="w-3.5 h-3.5 shrink-0 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 shrink-0" />}
                       <span>复制</span>
                     </button>
                     <button
@@ -491,9 +744,9 @@ function MainApp() {
                         const list = await invoke<SavedEntry[]>("list_saved_entries");
                         setEntries(list);
                       }}
-                      className="h-7 px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[12px] inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                      className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 text-[12px] inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
                     >
-                      <Bookmark className="w-3.5 h-3.5" />
+                      <Bookmark className="w-3.5 h-3.5 shrink-0" />
                       <span>收藏</span>
                     </button>
                   </div>
@@ -534,13 +787,13 @@ function MainApp() {
         {tab === "wordbook" && (
           <div className="max-w-3xl mx-auto space-y-4">
             <div className="flex items-center justify-between gap-4">
-              <div>
+              <div className="min-w-0 flex-1">
                 <h1 className="text-[18px] font-semibold tracking-tight">生词收藏本</h1>
                 <p className="text-[12.5px] text-zinc-500 dark:text-zinc-400">
                   保留查词时的真实原句语境，支持无缝导入旧版 SavedEntries.json
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -551,18 +804,18 @@ function MainApp() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="h-8 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1.5 text-[12.5px] font-medium cursor-pointer"
+                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1.5 text-[12.5px] font-medium cursor-pointer transition-colors"
                 >
-                  <Upload className="w-3.5 h-3.5" />
+                  <Upload className="w-3.5 h-3.5 shrink-0" />
                   <span>导入 JSON</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleExportJson}
                   disabled={entries.length === 0}
-                  className="h-8 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50 inline-flex items-center gap-1.5 text-[12.5px] font-medium cursor-pointer"
+                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50 inline-flex items-center gap-1.5 text-[12.5px] font-medium cursor-pointer transition-colors"
                 >
-                  <Download className="w-3.5 h-3.5" />
+                  <Download className="w-3.5 h-3.5 shrink-0" />
                   <span>导出备份</span>
                 </button>
               </div>
@@ -634,15 +887,15 @@ function MainApp() {
 
         {tab === "settings" && settings && activeEndpoint && (
           <div className="max-w-3xl mx-auto space-y-6 pb-8">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
                 <h1 className="text-[18px] font-semibold tracking-tight">偏好设置</h1>
                 <p className="text-[12.5px] text-zinc-500 dark:text-zinc-400">
                   所有配置原子落盘，API Key 独立加密存储于系统密钥环 (Keychain / Credential Manager)
                 </p>
               </div>
               {settingsSavedBanner && (
-                <span className="text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">
+                <span className="shrink-0 whitespace-nowrap text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">
                   ✓ 已自动保存
                 </span>
               )}
@@ -652,17 +905,17 @@ function MainApp() {
             {permissions && permissions.platform === "macos" && (
               <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
                 <div className="flex items-center gap-2 font-semibold text-[14px]">
-                  <ShieldCheck className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                  <ShieldCheck className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
                   <span>macOS 系统权限状态</span>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between">
-                    <div>
+                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
                       <div className="font-medium text-[13px]">辅助功能 (Accessibility)</div>
                       <div className="text-[11.5px] text-zinc-500">用于全局修饰键监听与无障碍取词</div>
                     </div>
                     {permissions.accessibility ? (
-                      <span className="text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
+                      <span className="shrink-0 whitespace-nowrap text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
                     ) : (
                       <button
                         type="button"
@@ -670,19 +923,19 @@ function MainApp() {
                           const p = await invoke<PermissionsStatus>("get_permissions_status", { prompt: true });
                           setPermissions(p);
                         }}
-                        className="h-7 px-2.5 rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
+                        className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
                       >
                         请求授权
                       </button>
                     )}
                   </div>
-                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between">
-                    <div>
+                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
                       <div className="font-medium text-[13px]">屏幕录制 (Screen Recording)</div>
                       <div className="text-[11.5px] text-zinc-500">用于 PDF/图片离线 Vision OCR 兜底</div>
                     </div>
                     {permissions.screenRecording ? (
-                      <span className="text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
+                      <span className="shrink-0 whitespace-nowrap text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
                     ) : (
                       <button
                         type="button"
@@ -690,7 +943,7 @@ function MainApp() {
                           const p = await invoke<PermissionsStatus>("request_screen_recording");
                           setPermissions(p);
                         }}
-                        className="h-7 px-2.5 rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
+                        className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
                       >
                         请求授权
                       </button>
@@ -700,7 +953,142 @@ function MainApp() {
               </section>
             )}
 
-            {/* Section 2: Trigger & Interaction */}
+            {/* Section 2: Global Shortcuts */}
+            <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 font-semibold text-[14px]">
+                  <Keyboard className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
+                  <span>全局快捷键设置</span>
+                </div>
+                <span className="text-[11.5px] text-zinc-500 whitespace-nowrap">
+                  点击快捷键胶囊即可录制 · 按 Esc 取消 · 按 Delete 清空
+                </span>
+              </div>
+
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {(
+                  [
+                    {
+                      target: "capture" as ShortcutTarget,
+                      title: "框选截图翻译",
+                      desc: "拖拽框选屏幕任意区域（PDF 扫描件、图表、截图）进行离线 OCR 与流式翻译",
+                      value: settings.captureShortcut,
+                      defaultValue: defaultCaptureShortcut,
+                      onChange: (val: string) =>
+                        persistSettings({ ...settings, captureShortcut: val }),
+                    },
+                    {
+                      target: "selection" as ShortcutTarget,
+                      title: "划词选区翻译",
+                      desc: "直接读取当前焦点窗口高亮选中的文本并弹出可交互翻译浮窗",
+                      value: settings.selectionShortcut,
+                      defaultValue: defaultSelectionShortcut,
+                      onChange: (val: string) =>
+                        persistSettings({ ...settings, selectionShortcut: val }),
+                    },
+                  ]
+                ).map((item) => {
+                  const isRec = recordingTarget === item.target;
+                  const caps = parseShortcutKeycaps(item.value, isMac);
+                  const isCustom = item.value !== item.defaultValue;
+
+                  return (
+                    <div
+                      key={item.target}
+                      className="py-2.5 first:pt-0.5 last:pb-0.5 flex items-center justify-between gap-4"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-[13px]">{item.title}</div>
+                        <div className="text-[11.5px] text-zinc-500">{item.desc}</div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShortcutHint(null);
+                            setRecordingModsPreview([]);
+                            setRecordingTarget(isRec ? null : item.target);
+                          }}
+                          className={`h-8 px-3 rounded-lg border inline-flex items-center gap-1 text-[12px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-all ${
+                            isRec
+                              ? "border-sky-500 bg-sky-500/10 text-sky-700 dark:text-sky-300 ring-2 ring-sky-500/25"
+                              : "border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/80 hover:border-zinc-400 dark:hover:border-zinc-600 text-zinc-800 dark:text-zinc-100"
+                          }`}
+                        >
+                          {isRec ? (
+                            recordingModsPreview.length > 0 ? (
+                              <span className="inline-flex items-center gap-1">
+                                {recordingModsPreview.map((m, idx) => (
+                                  <kbd
+                                    key={idx}
+                                    className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 text-[11.5px] font-sans"
+                                  >
+                                    {m}
+                                  </kbd>
+                                ))}
+                                <span className="text-sky-600/80 dark:text-sky-300/80">…</span>
+                              </span>
+                            ) : (
+                              <span>请按下组合键…</span>
+                            )
+                          ) : caps.length > 0 ? (
+                            caps.map((cap, idx) => (
+                              <kbd
+                                key={idx}
+                                className="px-1.5 py-0.5 rounded bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-700 text-[11.5px] font-sans shadow-2xs"
+                              >
+                                {cap}
+                              </kbd>
+                            ))
+                          ) : (
+                            <span className="text-zinc-400 dark:text-zinc-500">未设置（点击录制）</span>
+                          )}
+                        </button>
+
+                        {item.value && !isRec && (
+                          <button
+                            type="button"
+                            title="清空快捷键"
+                            aria-label="清空快捷键"
+                            onClick={() => {
+                              setShortcutHint(null);
+                              item.onChange("");
+                            }}
+                            className="w-7 h-8 shrink-0 rounded-lg inline-flex items-center justify-center text-zinc-400 hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer transition-colors"
+                          >
+                            <X className="w-3.5 h-3.5 shrink-0" />
+                          </button>
+                        )}
+
+                        {isCustom && !isRec && (
+                          <button
+                            type="button"
+                            title={`恢复默认 (${formatShortcutInline(item.defaultValue, isMac)})`}
+                            onClick={() => {
+                              setShortcutHint(null);
+                              item.onChange(item.defaultValue);
+                            }}
+                            className="h-8 px-2 shrink-0 whitespace-nowrap rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <RotateCcw className="w-3 h-3 shrink-0" />
+                            <span>默认</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {shortcutHint && (
+                <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-800 dark:text-amber-300 text-[12px]">
+                  {shortcutHint}
+                </div>
+              )}
+            </section>
+
+            {/* Section 3: Trigger & Interaction */}
             <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4">
               <div className="font-semibold text-[14px]">取词手势与交互</div>
 
@@ -741,28 +1129,47 @@ function MainApp() {
                   />
                 </label>
 
-                <label className="space-y-1 block">
-                  <span className="text-[12.5px] text-zinc-600 dark:text-zinc-400">
-                    松键后卡片驻留时长:{" "}
-                    <strong className="tabular-nums">{(settings.lingerDismissMs / 1000).toFixed(1)} s</strong>
-                  </span>
-                  <input
-                    type="range"
-                    min={1000}
-                    max={6000}
-                    step={250}
-                    value={settings.lingerDismissMs}
-                    onChange={(e) =>
-                      persistSettings({ ...settings, lingerDismissMs: Number(e.target.value) })
-                    }
-                    className="w-full accent-sky-600 mt-2"
-                  />
-                </label>
+                {!settings.dismissOnTriggerRelease && (
+                  <label className="space-y-1 block col-span-2">
+                    <span className="text-[12.5px] text-zinc-600 dark:text-zinc-400">
+                      松键后卡片驻留时长:{" "}
+                      <strong className="tabular-nums">{(settings.lingerDismissMs / 1000).toFixed(1)} s</strong>
+                    </span>
+                    <input
+                      type="range"
+                      min={1000}
+                      max={6000}
+                      step={250}
+                      value={settings.lingerDismissMs}
+                      onChange={(e) =>
+                        persistSettings({ ...settings, lingerDismissMs: Number(e.target.value) })
+                      }
+                      className="w-full accent-sky-600 mt-2"
+                    />
+                  </label>
+                )}
               </div>
 
               <div className="space-y-2.5 pt-2 border-t border-zinc-100 dark:border-zinc-800">
-                <label className="flex items-center justify-between cursor-pointer">
-                  <div>
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium text-[13px]">松开修饰键立即关闭悬停浮窗（按住即看、松开即关）</div>
+                    <div className="text-[11.5px] text-zinc-500">
+                      开启后松开 Option/Alt 立即收起悬停卡片；双击修饰键、快捷键或截图框选翻译仍保留可交互浮窗
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.dismissOnTriggerRelease}
+                    onChange={(e) =>
+                      persistSettings({ ...settings, dismissOnTriggerRelease: e.target.checked })
+                    }
+                    className="w-4 h-4 shrink-0 accent-sky-600"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div className="min-w-0 flex-1">
                     <div className="font-medium text-[13px]">双击修饰键直接翻译当前选区</div>
                     <div className="text-[11.5px] text-zinc-500">
                       选中文字后快速双击 Option/Alt，无论鼠标在何处直接弹出轻量浮窗
@@ -774,12 +1181,12 @@ function MainApp() {
                     onChange={(e) =>
                       persistSettings({ ...settings, doubleTapSelection: e.target.checked })
                     }
-                    className="w-4 h-4 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-sky-600"
                   />
                 </label>
 
-                <label className="flex items-center justify-between cursor-pointer">
-                  <div>
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div className="min-w-0 flex-1">
                     <div className="font-medium text-[13px]">启用本地离线 OCR 自动兜底（推荐）</div>
                     <div className="text-[11.5px] text-zinc-500">
                       遇到 PDF、Canvas、图片或无映射控件时零延迟调用系统离线 OCR 并按列智能拼句
@@ -791,12 +1198,12 @@ function MainApp() {
                     onChange={(e) =>
                       persistSettings({ ...settings, enableOcrFallback: e.target.checked })
                     }
-                    className="w-4 h-4 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-sky-600"
                   />
                 </label>
 
-                <label className="flex items-center justify-between cursor-pointer">
-                  <div>
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div className="min-w-0 flex-1">
                     <div className="font-medium text-[13px]">选区读取剪贴板备份还原兜底（可选）</div>
                     <div className="text-[11.5px] text-zinc-500">
                       仅当目标软件不支持无障碍选区时，备份原剪贴板 → 模拟复制 → 30ms 内无感还原（密码框严格跳过）
@@ -808,7 +1215,7 @@ function MainApp() {
                     onChange={(e) =>
                       persistSettings({ ...settings, enableClipboardFallback: e.target.checked })
                     }
-                    className="w-4 h-4 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-sky-600"
                   />
                 </label>
               </div>
@@ -824,8 +1231,8 @@ function MainApp() {
               </div>
 
               <div className="space-y-2.5 pb-3 border-b border-zinc-100 dark:border-zinc-800">
-                <label className="flex items-center justify-between cursor-pointer">
-                  <div>
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div className="min-w-0 flex-1">
                     <div className="font-medium text-[13px]">开启百毫秒极速机器翻译预热层 (80~250ms)</div>
                     <div className="text-[11.5px] text-zinc-500">
                       在大模型流式生成前先秒出非推理机器直译，彻底消除空白等待
@@ -835,12 +1242,12 @@ function MainApp() {
                     type="checkbox"
                     checked={settings.enableFastMt}
                     onChange={(e) => persistSettings({ ...settings, enableFastMt: e.target.checked })}
-                    className="w-4 h-4 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-sky-600"
                   />
                 </label>
 
-                <label className="flex items-center justify-between cursor-pointer">
-                  <div>
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div className="min-w-0 flex-1">
                     <div className="font-medium text-[13px]">纯查单词时仅用「离线词典 + 极速机翻」（零 Token 模式）</div>
                     <div className="text-[11.5px] text-zinc-500">
                       悬停单个词时不消耗大模型额度；点击浮窗 [译整句] 或 [解释] 时仍正常调用大模型
@@ -850,7 +1257,7 @@ function MainApp() {
                     type="checkbox"
                     checked={settings.wordFastOnly}
                     onChange={(e) => persistSettings({ ...settings, wordFastOnly: e.target.checked })}
-                    className="w-4 h-4 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-sky-600"
                   />
                 </label>
               </div>
@@ -870,7 +1277,7 @@ function MainApp() {
                       setTestResult(null);
                       persistSettings({ ...settings, activeProvider: p.id });
                     }}
-                    className={`h-9 rounded-xl border text-[12.5px] font-medium cursor-pointer transition-colors ${
+                    className={`h-9 px-2 whitespace-nowrap rounded-xl border text-[12.5px] font-medium cursor-pointer transition-colors ${
                       settings.activeProvider === p.id
                         ? "border-sky-500 bg-sky-500/10 text-sky-700 dark:text-sky-300"
                         : "border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
@@ -908,7 +1315,7 @@ function MainApp() {
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[12px]">
                   <span className="text-zinc-500 flex items-center gap-1">
-                    <KeyRound className="w-3.5 h-3.5" />
+                    <KeyRound className="w-3.5 h-3.5 shrink-0" />
                     <span>
                       API Key 状态:{" "}
                       {keyStatus[settings.activeProvider] ? (
@@ -929,13 +1336,13 @@ function MainApp() {
                         ? "输入新密钥以覆盖更新（留空保持不变）…"
                         : "粘贴当前服务商的 API Key…"
                     }
-                    className="flex-1 h-9 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
+                    className="min-w-0 flex-1 h-9 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
                   />
                   <button
                     type="button"
                     onClick={handleSaveApiKey}
                     disabled={!apiKeyDraft.trim()}
-                    className="h-9 px-3.5 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 disabled:opacity-40 text-[12.5px] font-medium cursor-pointer"
+                    className="h-9 px-3.5 shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 disabled:opacity-40 text-[12.5px] font-medium cursor-pointer"
                   >
                     保存密钥
                   </button>
@@ -943,9 +1350,9 @@ function MainApp() {
                     type="button"
                     onClick={handleTestConnection}
                     disabled={testingConn}
-                    className="h-9 px-3.5 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300 text-[12.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                    className="h-9 px-3.5 shrink-0 whitespace-nowrap rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300 text-[12.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    <Activity className="w-3.5 h-3.5" />
+                    <Activity className="w-3.5 h-3.5 shrink-0" />
                     <span>{testingConn ? "测速中…" : "流式连接自检"}</span>
                   </button>
                 </div>
@@ -1009,7 +1416,7 @@ function MainApp() {
                   value={newExcludedApp}
                   onChange={(e) => setNewExcludedApp(e.target.value)}
                   placeholder="例如 com.apple.Terminal 或 code.exe"
-                  className="flex-1 h-8 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[12.5px] font-mono"
+                  className="min-w-0 flex-1 h-8 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[12.5px] font-mono"
                 />
                 <button
                   type="button"
@@ -1022,9 +1429,9 @@ function MainApp() {
                       excludedApps: [...settings.excludedApps, clean],
                     });
                   }}
-                  className="h-8 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 text-[12.5px] cursor-pointer"
+                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 text-[12.5px] cursor-pointer"
                 >
-                  <Plus className="w-3.5 h-3.5" />
+                  <Plus className="w-3.5 h-3.5 shrink-0" />
                   <span>添加</span>
                 </button>
               </div>

@@ -176,16 +176,19 @@ impl CoordinatorStateMachine {
         StateTransitionAction::None
     }
 
-    /// Releasing the trigger key NEVER cancels an active translation stream!
-    /// If a card is currently visible in `HoldingPassThrough`, it transitions smoothly
-    /// into `Lingering` (`interactive = true`) while streaming continues uninterrupted.
-    /// In addition, a clean standalone tap (`clean_tap == true`, released before `hover_dwell_ms`
-    /// with no other key/mouse chord) immediately triggers hover/selection extraction at `pointer`.
+    /// Handles trigger key release according to user preference:
+    /// - When `dismiss_on_release` is `true` ("按住即看、松开即关"): immediately dismisses any
+    ///   hover card in `HoldingPassThrough` and cancels pending dwell, while leaving `Pinned`
+    ///   or explicit interactive (`Lingering`/`PointerInside`) cards untouched.
+    /// - When `dismiss_on_release` is `false`: transitions `HoldingPassThrough` smoothly into
+    ///   `Lingering` (`interactive = true`) while streaming continues uninterrupted, and supports
+    ///   clean single-tap extraction.
     pub fn on_trigger_released(
         &mut self,
         pointer: ScreenPoint,
         clean_tap: bool,
         now: Instant,
+        dismiss_on_release: bool,
         linger_ms: u64,
     ) -> StateTransitionAction {
         let had_pending_dwell = self.dwell_deadline.is_some();
@@ -199,6 +202,9 @@ impl CoordinatorStateMachine {
 
         match self.phase {
             CardPhase::HoldingPassThrough { generation } => {
+                if dismiss_on_release {
+                    return self.dismiss();
+                }
                 self.card.interactive = true;
                 if self.popup_rect.is_some_and(|r| r.contains(pointer)) {
                     self.phase = CardPhase::PointerInside { generation };
@@ -210,10 +216,12 @@ impl CoordinatorStateMachine {
                 }
                 StateTransitionAction::SetPopupInteractive(true)
             }
-            _ if clean_tap && had_pending_dwell => StateTransitionAction::StartHoverExtraction {
-                pointer,
-                sentence_mode: was_sentence_mod,
-            },
+            _ if !dismiss_on_release && clean_tap && had_pending_dwell => {
+                StateTransitionAction::StartHoverExtraction {
+                    pointer,
+                    sentence_mode: was_sentence_mod,
+                }
+            }
             _ => StateTransitionAction::None,
         }
     }
@@ -493,11 +501,12 @@ mod tests {
         );
         assert!(!sm.card.interactive);
 
-        // 3. User IMMEDIATELY releases Option while LLM is still streaming!
+        // 3. When linger mode is active (`dismiss_on_release = false`), releasing Option keeps card alive
         let rel = sm.on_trigger_released(
             ScreenPoint::new(303.0, 204.0),
             false,
             t0 + Duration::from_millis(200),
+            false,
             2500,
         );
         assert_eq!(rel, StateTransitionAction::SetPopupInteractive(true));
@@ -559,9 +568,10 @@ mod tests {
         let t0 = Instant::now();
         let pt = ScreenPoint::new(420.0, 310.0);
 
-        // Quick standalone tap (< 150ms dwell) -> starts hover extraction immediately on release!
+        // Quick standalone tap (< 150ms dwell) with linger mode -> starts hover extraction immediately on release!
         sm.on_trigger_pressed(pt, false, t0, 150);
-        let tap_act = sm.on_trigger_released(pt, true, t0 + Duration::from_millis(75), 2500);
+        let tap_act =
+            sm.on_trigger_released(pt, true, t0 + Duration::from_millis(75), false, 2500);
         assert_eq!(
             tap_act,
             StateTransitionAction::StartHoverExtraction {
@@ -573,7 +583,46 @@ mod tests {
         // Option+Key chord (`on_other_key_pressed` before release) -> never false-triggers!
         sm.on_trigger_pressed(pt, false, t0 + Duration::from_millis(500), 150);
         sm.on_other_key_pressed();
-        let chord_act = sm.on_trigger_released(pt, false, t0 + Duration::from_millis(580), 2500);
+        let chord_act =
+            sm.on_trigger_released(pt, false, t0 + Duration::from_millis(580), false, 2500);
         assert_eq!(chord_act, StateTransitionAction::None);
+    }
+
+    #[test]
+    fn releasing_trigger_immediately_dismisses_hover_card_when_enabled() {
+        let mut sm = CoordinatorStateMachine::new();
+        let t0 = Instant::now();
+        let pt = ScreenPoint::new(260.0, 180.0);
+
+        sm.on_trigger_pressed(pt, false, t0, 150);
+        let _ = sm.on_tick(t0 + Duration::from_millis(160), 2500);
+
+        sm.present_card(
+            PopupCardViewState {
+                generation: 1,
+                original_text: "glass".into(),
+                is_streaming: true,
+                ..Default::default()
+            },
+            Some(ScreenRect::new(250.0, 172.0, 48.0, 18.0)),
+            ScreenRect::new(250.0, 200.0, 360.0, 140.0),
+            false,
+            t0 + Duration::from_millis(170),
+            2500,
+        );
+        assert!(matches!(sm.phase, CardPhase::HoldingPassThrough { .. }));
+
+        // Releasing Option with `dismiss_on_release = true` closes popup immediately!
+        let rel = sm.on_trigger_released(pt, false, t0 + Duration::from_millis(240), true, 2500);
+        assert_eq!(rel, StateTransitionAction::DismissPopup);
+        assert!(!sm.card.visible);
+        assert_eq!(sm.phase, CardPhase::Hidden);
+
+        // Quick tap before dwell with `dismiss_on_release = true` cancels pending dwell cleanly
+        sm.on_trigger_pressed(pt, false, t0 + Duration::from_millis(300), 150);
+        let tap_rel =
+            sm.on_trigger_released(pt, true, t0 + Duration::from_millis(360), true, 2500);
+        assert_eq!(tap_rel, StateTransitionAction::None);
+        assert!(!sm.card.visible);
     }
 }

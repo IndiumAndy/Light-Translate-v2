@@ -6,7 +6,10 @@ use crate::extraction::{
     is_allowed_input_text, ExtractionCompleteness, ExtractionFailure, ExtractionScope,
     ExtractionSnapshot, ExtractionSource, ScreenPoint, ScreenRect,
 };
-use crate::platform::{InputEventCallback, PermissionsStatus, PlatformBackend, PlatformInputEvent};
+use crate::platform::{
+    InputEventCallback, PermissionsStatus, PlatformBackend, PlatformInputEvent, ShortcutSpec,
+    SHORTCUT_MOD_ALT, SHORTCUT_MOD_CTRL, SHORTCUT_MOD_META, SHORTCUT_MOD_SHIFT,
+};
 use crate::storage::TriggerModifier;
 use parking_lot::Mutex;
 use std::path::Path;
@@ -90,6 +93,11 @@ static HOOK_STATE: LazyLock<Mutex<HookRuntimeState>> =
     LazyLock::new(|| Mutex::new(HookRuntimeState::default()));
 static TRIGGER_KIND: AtomicI32 = AtomicI32::new(0);
 static DOUBLE_TAP_ENABLED: AtomicBool = AtomicBool::new(true);
+static SHORTCUT_RECORDING: AtomicBool = AtomicBool::new(false);
+static SELECTION_SHORTCUT: LazyLock<Mutex<Option<(u32, u32)>>> =
+    LazyLock::new(|| Mutex::new(Some((SHORTCUT_MOD_ALT | SHORTCUT_MOD_SHIFT, VK_T.0 as u32))));
+static CAPTURE_SHORTCUT: LazyLock<Mutex<Option<(u32, u32)>>> =
+    LazyLock::new(|| Mutex::new(Some((SHORTCUT_MOD_ALT | SHORTCUT_MOD_SHIFT, VK_S.0 as u32))));
 static HOOK_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn emit_event(ev: PlatformInputEvent) {
@@ -155,7 +163,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if code >= 0 && lparam.0 != 0 {
+    if code >= 0 && lparam.0 != 0 && !SHORTCUT_RECORDING.load(Ordering::Relaxed) {
         let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let msg = wparam.0 as u32;
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -164,22 +172,31 @@ unsafe extern "system" fn keyboard_hook_proc(
         let kind = TRIGGER_KIND.load(Ordering::Relaxed);
         let pointer = read_cursor_logical();
         let win_held = key_down_async(VK_LWIN.0 as i32) || key_down_async(VK_RWIN.0 as i32);
+        let mut active_mods = 0u32;
+        if key_down_async(VK_CONTROL.0 as i32) {
+            active_mods |= SHORTCUT_MOD_CTRL;
+        }
+        if key_down_async(VK_MENU.0 as i32) {
+            active_mods |= SHORTCUT_MOD_ALT;
+        }
+        if key_down_async(VK_SHIFT.0 as i32) {
+            active_mods |= SHORTCUT_MOD_SHIFT;
+        }
+        if win_held {
+            active_mods |= SHORTCUT_MOD_META;
+        }
+        let sel_bind = *SELECTION_SHORTCUT.lock();
+        let cap_bind = *CAPTURE_SHORTCUT.lock();
 
         if is_down && vk == VK_ESCAPE.0 as u32 {
             emit_event(PlatformInputEvent::EscapePressed);
         } else if is_down
-            && !win_held
-            && key_down_async(VK_MENU.0 as i32)
-            && key_down_async(VK_SHIFT.0 as i32)
-            && vk == VK_T.0 as u32
+            && sel_bind.is_some_and(|(mods, target_vk)| active_mods == mods && vk == target_vk)
         {
             HOOK_STATE.lock().other_key_during_tap = true;
             emit_event(PlatformInputEvent::ShortcutSelection { pointer });
         } else if is_down
-            && !win_held
-            && key_down_async(VK_MENU.0 as i32)
-            && key_down_async(VK_SHIFT.0 as i32)
-            && vk == VK_S.0 as u32
+            && cap_bind.is_some_and(|(mods, target_vk)| active_mods == mods && vk == target_vk)
         {
             HOOK_STATE.lock().other_key_during_tap = true;
             emit_event(PlatformInputEvent::ShortcutCapture);
@@ -694,7 +711,13 @@ impl PlatformBackend for WindowsPlatform {
         });
     }
 
-    fn update_trigger_config(&self, modifier: TriggerModifier, double_tap_selection: bool) {
+    fn update_trigger_config(
+        &self,
+        modifier: TriggerModifier,
+        double_tap_selection: bool,
+        selection_shortcut: &str,
+        capture_shortcut: &str,
+    ) {
         let code = match modifier {
             TriggerModifier::AltOrOption => 0,
             TriggerModifier::LeftOption => 1,
@@ -703,6 +726,14 @@ impl PlatformBackend for WindowsPlatform {
         };
         TRIGGER_KIND.store(code, Ordering::Relaxed);
         DOUBLE_TAP_ENABLED.store(double_tap_selection, Ordering::Relaxed);
+        *SELECTION_SHORTCUT.lock() = ShortcutSpec::parse(selection_shortcut)
+            .and_then(|s| s.windows_vk().map(|vk| (s.modifier_mask(), vk)));
+        *CAPTURE_SHORTCUT.lock() = ShortcutSpec::parse(capture_shortcut)
+            .and_then(|s| s.windows_vk().map(|vk| (s.modifier_mask(), vk)));
+    }
+
+    fn set_shortcut_recording(&self, active: bool) {
+        SHORTCUT_RECORDING.store(active, Ordering::Relaxed);
     }
 
     fn current_pointer(&self) -> ScreenPoint {

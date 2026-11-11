@@ -51,6 +51,208 @@ pub struct PermissionsStatus {
     pub screen_recording: bool,
 }
 
+pub const SHORTCUT_MOD_CTRL: u32 = 1 << 0;
+pub const SHORTCUT_MOD_ALT: u32 = 1 << 1;
+pub const SHORTCUT_MOD_SHIFT: u32 = 1 << 2;
+pub const SHORTCUT_MOD_META: u32 = 1 << 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutSpec {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
+    pub key: String,
+}
+
+impl ShortcutSpec {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        let mut meta = false;
+        let mut key: Option<String> = None;
+
+        for part in trimmed.split('+').map(str::trim).filter(|s| !s.is_empty()) {
+            match part.to_ascii_lowercase().as_str() {
+                "control" | "ctrl" | "⌃" => ctrl = true,
+                "alt" | "option" | "opt" | "⌥" => alt = true,
+                "shift" | "⇧" => shift = true,
+                "command" | "cmd" | "meta" | "super" | "win" | "⌘" => meta = true,
+                other => {
+                    let canonical = canonicalize_shortcut_key(other)?;
+                    key = Some(canonical);
+                }
+            }
+        }
+
+        let key = key?;
+        let is_fn_key = key.starts_with('F') && key.len() >= 2 && key[1..].chars().all(|c| c.is_ascii_digit());
+        if !ctrl && !alt && !meta && !is_fn_key {
+            return None;
+        }
+
+        Some(Self {
+            ctrl,
+            alt,
+            shift,
+            meta,
+            key,
+        })
+    }
+
+    pub fn modifier_mask(&self) -> u32 {
+        let mut mask = 0;
+        if self.ctrl {
+            mask |= SHORTCUT_MOD_CTRL;
+        }
+        if self.alt {
+            mask |= SHORTCUT_MOD_ALT;
+        }
+        if self.shift {
+            mask |= SHORTCUT_MOD_SHIFT;
+        }
+        if self.meta {
+            mask |= SHORTCUT_MOD_META;
+        }
+        mask
+    }
+
+    pub fn format_display(&self, is_macos: bool) -> String {
+        let key_disp = match self.key.as_str() {
+            "SPACE" => "Space",
+            "GRAVE" => "`",
+            "MINUS" => "-",
+            "EQUAL" => "=",
+            "BRACKETLEFT" => "[",
+            "BRACKETRIGHT" => "]",
+            "BACKSLASH" => "\\",
+            "SEMICOLON" => ";",
+            "QUOTE" => "'",
+            "COMMA" => ",",
+            "PERIOD" => ".",
+            "SLASH" => "/",
+            other => other,
+        };
+
+        if is_macos {
+            let mut out = String::new();
+            if self.ctrl {
+                out.push('⌃');
+            }
+            if self.alt {
+                out.push('⌥');
+            }
+            if self.shift {
+                out.push('⇧');
+            }
+            if self.meta {
+                out.push('⌘');
+            }
+            out.push_str(key_disp);
+            out
+        } else {
+            let mut parts = Vec::new();
+            if self.ctrl {
+                parts.push("Ctrl");
+            }
+            if self.alt {
+                parts.push("Alt");
+            }
+            if self.shift {
+                parts.push("Shift");
+            }
+            if self.meta {
+                parts.push("Win");
+            }
+            parts.push(key_disp);
+            parts.join("+")
+        }
+    }
+
+    pub fn windows_vk(&self) -> Option<u32> {
+        let k = self.key.as_str();
+        if k.len() == 1 {
+            let b = k.as_bytes()[0];
+            if b.is_ascii_uppercase() || b.is_ascii_digit() {
+                return Some(b as u32);
+            }
+        }
+        if let Some(num_str) = k.strip_prefix('F') {
+            if let Ok(n) = num_str.parse::<u32>() {
+                if (1..=12).contains(&n) {
+                    return Some(0x70 + n - 1);
+                }
+            }
+        }
+        match k {
+            "SPACE" => Some(0x20),
+            "SEMICOLON" => Some(0xBA),
+            "EQUAL" => Some(0xBB),
+            "COMMA" => Some(0xBC),
+            "MINUS" => Some(0xBD),
+            "PERIOD" => Some(0xBE),
+            "SLASH" => Some(0xBF),
+            "GRAVE" => Some(0xC0),
+            "BRACKETLEFT" => Some(0xDB),
+            "BACKSLASH" => Some(0xDC),
+            "BRACKETRIGHT" => Some(0xDD),
+            "QUOTE" => Some(0xDE),
+            _ => None,
+        }
+    }
+}
+
+fn canonicalize_shortcut_key(token: &str) -> Option<String> {
+    let lower = token.to_ascii_lowercase();
+    if lower.len() == 1 {
+        let ch = lower.chars().next()?;
+        if ch.is_ascii_alphabetic() {
+            return Some(ch.to_ascii_uppercase().to_string());
+        }
+        if ch.is_ascii_digit() {
+            return Some(ch.to_string());
+        }
+    }
+    if let Some(letter) = lower.strip_prefix("key") {
+        if letter.len() == 1 && letter.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Some(letter.to_ascii_uppercase());
+        }
+    }
+    if let Some(digit) = lower.strip_prefix("digit") {
+        if digit.len() == 1 && digit.chars().all(|c| c.is_ascii_digit()) {
+            return Some(digit.to_string());
+        }
+    }
+    if let Some(fnum) = lower.strip_prefix('f') {
+        if let Ok(n) = fnum.parse::<u8>() {
+            if (1..=12).contains(&n) {
+                return Some(format!("F{n}"));
+            }
+        }
+    }
+    match lower.as_str() {
+        "space" => Some("SPACE".into()),
+        "`" | "grave" | "backquote" => Some("GRAVE".into()),
+        "-" | "minus" => Some("MINUS".into()),
+        "=" | "equal" => Some("EQUAL".into()),
+        "[" | "bracketleft" => Some("BRACKETLEFT".into()),
+        "]" | "bracketright" => Some("BRACKETRIGHT".into()),
+        "\\" | "backslash" => Some("BACKSLASH".into()),
+        ";" | "semicolon" => Some("SEMICOLON".into()),
+        "'" | "quote" => Some("QUOTE".into()),
+        "," | "comma" => Some("COMMA".into()),
+        "." | "period" => Some("PERIOD".into()),
+        "/" | "slash" => Some("SLASH".into()),
+        _ => None,
+    }
+}
+
 pub type InputEventCallback = Arc<dyn Fn(PlatformInputEvent) + Send + Sync + 'static>;
 
 /// Unified cross-platform boundary implemented by `macos.rs`, `windows.rs`, and `linux.rs`.
@@ -58,8 +260,17 @@ pub trait PlatformBackend: Send + Sync {
     /// Start global low-level modifier, pointer, and hotkey monitoring.
     fn start_input_monitor(&self, callback: InputEventCallback);
 
-    /// Update active trigger modifier / double-tap configuration dynamically when user saves Settings.
-    fn update_trigger_config(&self, modifier: TriggerModifier, double_tap_selection: bool);
+    /// Update active trigger modifier, double-tap, and global shortcuts dynamically when user saves Settings.
+    fn update_trigger_config(
+        &self,
+        modifier: TriggerModifier,
+        double_tap_selection: bool,
+        selection_shortcut: &str,
+        capture_shortcut: &str,
+    );
+
+    /// Pause global shortcut dispatch while user is actively recording a new shortcut in Settings.
+    fn set_shortcut_recording(&self, _active: bool) {}
 
     /// Current pointer location in top-left logical screen coordinates.
     fn current_pointer(&self) -> ScreenPoint;
@@ -178,5 +389,25 @@ mod tests {
         let other: PlatformInputEvent =
             serde_json::from_str(r#"{"kind":"otherKeyPressed"}"#).expect("otherKeyPressed");
         assert_eq!(other, PlatformInputEvent::OtherKeyPressed);
+    }
+
+    #[test]
+    fn parses_and_formats_global_shortcuts() {
+        let cap = ShortcutSpec::parse("Control+Command+S").expect("valid macOS shortcut");
+        assert_eq!(cap.format_display(true), "⌃⌘S");
+        assert_eq!(cap.modifier_mask(), SHORTCUT_MOD_CTRL | SHORTCUT_MOD_META);
+        assert_eq!(cap.key, "S");
+
+        let win = ShortcutSpec::parse("Alt+Shift+A").expect("valid Alt+Shift shortcut");
+        assert_eq!(win.format_display(false), "Alt+Shift+A");
+        assert_eq!(win.windows_vk(), Some(0x41));
+
+        let fn_key = ShortcutSpec::parse("F4").expect("standalone F-key allowed");
+        assert_eq!(fn_key.format_display(true), "F4");
+
+        // Plain single character or Shift+letter without primary modifier must be rejected
+        assert!(ShortcutSpec::parse("S").is_none());
+        assert!(ShortcutSpec::parse("Shift+S").is_none());
+        assert!(ShortcutSpec::parse("").is_none());
     }
 }

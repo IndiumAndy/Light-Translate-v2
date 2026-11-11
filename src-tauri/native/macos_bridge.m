@@ -82,9 +82,19 @@ static NSRect lt_topleft_rect_to_appkit(double x, double y, double w, double h) 
 // Global Input Monitor (Modifiers, Double-Tap, Pointer, Hotkeys)
 // ============================================================================
 
+#define LT_MOD_CTRL  (1u << 0)
+#define LT_MOD_ALT   (1u << 1)
+#define LT_MOD_SHIFT (1u << 2)
+#define LT_MOD_META  (1u << 3)
+
 static lt_input_event_cb g_input_cb = NULL;
 static int32_t g_trigger_modifier = 0; // 0=AltOrOption, 1=LeftOption, 2=RightOption, 3=Control
 static bool g_double_tap_enabled = true;
+static uint32_t g_selection_mods = (LT_MOD_ALT | LT_MOD_META);
+static int32_t g_selection_keycode = kVK_ANSI_T;
+static uint32_t g_capture_mods = (LT_MOD_CTRL | LT_MOD_META);
+static int32_t g_capture_keycode = kVK_ANSI_S;
+static bool g_shortcut_recording = false;
 
 static bool g_trigger_down = false;
 static bool g_sentence_mod_down = false;
@@ -219,9 +229,92 @@ static bool lt_is_sentence_mod_active(NSEventModifierFlags flags) {
     return (flags & NSEventModifierFlagControl) != 0;
 }
 
-static void lt_handle_ns_event(NSEvent *event) {
-    if (!event) return;
+static int32_t lt_keycode_for_name(const char *name) {
+    if (!name || name[0] == '\0') return -1;
+    if (name[1] == '\0') {
+        switch (name[0]) {
+            case 'A': return kVK_ANSI_A;
+            case 'B': return kVK_ANSI_B;
+            case 'C': return kVK_ANSI_C;
+            case 'D': return kVK_ANSI_D;
+            case 'E': return kVK_ANSI_E;
+            case 'F': return kVK_ANSI_F;
+            case 'G': return kVK_ANSI_G;
+            case 'H': return kVK_ANSI_H;
+            case 'I': return kVK_ANSI_I;
+            case 'J': return kVK_ANSI_J;
+            case 'K': return kVK_ANSI_K;
+            case 'L': return kVK_ANSI_L;
+            case 'M': return kVK_ANSI_M;
+            case 'N': return kVK_ANSI_N;
+            case 'O': return kVK_ANSI_O;
+            case 'P': return kVK_ANSI_P;
+            case 'Q': return kVK_ANSI_Q;
+            case 'R': return kVK_ANSI_R;
+            case 'S': return kVK_ANSI_S;
+            case 'T': return kVK_ANSI_T;
+            case 'U': return kVK_ANSI_U;
+            case 'V': return kVK_ANSI_V;
+            case 'W': return kVK_ANSI_W;
+            case 'X': return kVK_ANSI_X;
+            case 'Y': return kVK_ANSI_Y;
+            case 'Z': return kVK_ANSI_Z;
+            case '0': return kVK_ANSI_0;
+            case '1': return kVK_ANSI_1;
+            case '2': return kVK_ANSI_2;
+            case '3': return kVK_ANSI_3;
+            case '4': return kVK_ANSI_4;
+            case '5': return kVK_ANSI_5;
+            case '6': return kVK_ANSI_6;
+            case '7': return kVK_ANSI_7;
+            case '8': return kVK_ANSI_8;
+            case '9': return kVK_ANSI_9;
+            default: break;
+        }
+    }
+    if (strcmp(name, "F1") == 0) return kVK_F1;
+    if (strcmp(name, "F2") == 0) return kVK_F2;
+    if (strcmp(name, "F3") == 0) return kVK_F3;
+    if (strcmp(name, "F4") == 0) return kVK_F4;
+    if (strcmp(name, "F5") == 0) return kVK_F5;
+    if (strcmp(name, "F6") == 0) return kVK_F6;
+    if (strcmp(name, "F7") == 0) return kVK_F7;
+    if (strcmp(name, "F8") == 0) return kVK_F8;
+    if (strcmp(name, "F9") == 0) return kVK_F9;
+    if (strcmp(name, "F10") == 0) return kVK_F10;
+    if (strcmp(name, "F11") == 0) return kVK_F11;
+    if (strcmp(name, "F12") == 0) return kVK_F12;
+    if (strcmp(name, "SPACE") == 0) return kVK_Space;
+    if (strcmp(name, "GRAVE") == 0) return kVK_ANSI_Grave;
+    if (strcmp(name, "MINUS") == 0) return kVK_ANSI_Minus;
+    if (strcmp(name, "EQUAL") == 0) return kVK_ANSI_Equal;
+    if (strcmp(name, "BRACKETLEFT") == 0) return kVK_ANSI_LeftBracket;
+    if (strcmp(name, "BRACKETRIGHT") == 0) return kVK_ANSI_RightBracket;
+    if (strcmp(name, "BACKSLASH") == 0) return kVK_ANSI_Backslash;
+    if (strcmp(name, "SEMICOLON") == 0) return kVK_ANSI_Semicolon;
+    if (strcmp(name, "QUOTE") == 0) return kVK_ANSI_Quote;
+    if (strcmp(name, "COMMA") == 0) return kVK_ANSI_Comma;
+    if (strcmp(name, "PERIOD") == 0) return kVK_ANSI_Period;
+    if (strcmp(name, "SLASH") == 0) return kVK_ANSI_Slash;
+    return -1;
+}
+
+static uint32_t lt_active_mod_mask(NSEventModifierFlags flags) {
+    uint32_t mask = 0;
+    if ((flags & NSEventModifierFlagControl) != 0) mask |= LT_MOD_CTRL;
+    if ((flags & NSEventModifierFlagOption) != 0)  mask |= LT_MOD_ALT;
+    if ((flags & NSEventModifierFlagShift) != 0)   mask |= LT_MOD_SHIFT;
+    if ((flags & NSEventModifierFlagCommand) != 0) mask |= LT_MOD_META;
+    return mask;
+}
+
+// Returns true when event matched an app-handled global shortcut (so local monitor can suppress beep)
+static bool lt_handle_ns_event(NSEvent *event) {
+    if (!event) return false;
     NSEventType type = [event type];
+    if (g_shortcut_recording && (type == NSEventTypeFlagsChanged || type == NSEventTypeKeyDown)) {
+        return false;
+    }
     CGPoint pt = lt_current_topleft_pointer();
 
     if (type == NSEventTypeFlagsChanged) {
@@ -287,7 +380,7 @@ static void lt_handle_ns_event(NSEvent *event) {
                 @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
             });
         }
-        return;
+        return false;
     }
 
     if (type == NSEventTypeKeyDown) {
@@ -297,30 +390,32 @@ static void lt_handle_ns_event(NSEvent *event) {
 
         if (keyCode == kVK_Escape) {
             lt_emit_event(@{ @"kind": @"escapePressed" });
-            return;
+            return false;
         }
 
-        bool opt = (flags & NSEventModifierFlagOption) != 0;
-        bool cmd = (flags & NSEventModifierFlagCommand) != 0;
-        bool ctrl = (flags & NSEventModifierFlagControl) != 0;
+        uint32_t activeMods = lt_active_mod_mask(flags);
 
-        // Alt+Cmd+T -> Selection translate shortcut
-        if (opt && cmd && !ctrl && keyCode == kVK_ANSI_T) {
+        // Selection translate shortcut (configurable, default Alt+Cmd+T)
+        if (g_selection_keycode >= 0
+            && (int32_t)keyCode == g_selection_keycode
+            && activeMods == g_selection_mods) {
             lt_emit_event(@{
                 @"kind": @"shortcutSelection",
                 @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
             });
-            return;
+            return true;
         }
 
-        // Ctrl+Cmd+S -> Region OCR capture shortcut
-        if (ctrl && cmd && !opt && keyCode == kVK_ANSI_S) {
+        // Region OCR capture shortcut (configurable, default Ctrl+Cmd+S)
+        if (g_capture_keycode >= 0
+            && (int32_t)keyCode == g_capture_keycode
+            && activeMods == g_capture_mods) {
             lt_emit_event(@{ @"kind": @"shortcutCapture" });
-            return;
+            return true;
         }
 
         lt_emit_event(@{ @"kind": @"otherKeyPressed" });
-        return;
+        return false;
     }
 
     if (type == NSEventTypeMouseMoved || type == NSEventTypeLeftMouseDragged || type == NSEventTypeRightMouseDragged) {
@@ -328,7 +423,7 @@ static void lt_handle_ns_event(NSEvent *event) {
             @"kind": @"pointerMoved",
             @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
         });
-        return;
+        return false;
     }
 
     if (type == NSEventTypeLeftMouseDown || type == NSEventTypeRightMouseDown || type == NSEventTypeOtherMouseDown) {
@@ -338,6 +433,7 @@ static void lt_handle_ns_event(NSEvent *event) {
             @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
         });
     }
+    return false;
 }
 
 void lt_macos_start_input_monitor(lt_input_event_cb callback) {
@@ -364,15 +460,35 @@ void lt_macos_start_input_monitor(lt_input_event_cb callback) {
         }];
 
         g_local_event_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:(keyMask | mouseMask) handler:^NSEvent *(NSEvent *event) {
-            lt_handle_ns_event(event);
-            return event;
+            bool consumedShortcut = lt_handle_ns_event(event);
+            return consumedShortcut ? nil : event;
         }];
     });
 }
 
-void lt_macos_update_trigger_config(int32_t modifier_kind, bool double_tap_selection) {
+void lt_macos_update_trigger_config(
+    int32_t modifier_kind,
+    bool double_tap_selection,
+    uint32_t selection_mods,
+    const char *selection_key,
+    uint32_t capture_mods,
+    const char *capture_key
+) {
     g_trigger_modifier = modifier_kind;
     g_double_tap_enabled = double_tap_selection;
+    g_selection_mods = selection_mods;
+    g_selection_keycode = lt_keycode_for_name(selection_key);
+    g_capture_mods = capture_mods;
+    g_capture_keycode = lt_keycode_for_name(capture_key);
+}
+
+void lt_macos_set_shortcut_recording(bool active) {
+    g_shortcut_recording = active;
+    if (active) {
+        g_trigger_down = false;
+        g_sentence_mod_down = false;
+        g_last_tap_release_time = 0.0;
+    }
 }
 
 // ============================================================================

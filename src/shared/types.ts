@@ -68,6 +68,7 @@ export interface AppSettings {
   enabled: boolean;
   triggerModifier: TriggerModifier;
   hoverDwellMs: number;
+  dismissOnTriggerRelease: boolean;
   lingerDismissMs: number;
   debounceRadiusPt: number;
   doubleTapSelection: boolean;

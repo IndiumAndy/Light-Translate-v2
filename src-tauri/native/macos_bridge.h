@@ -9,7 +9,15 @@ extern "C" {
 typedef void (*lt_input_event_cb)(const char *json_utf8);
 
 void lt_macos_start_input_monitor(lt_input_event_cb callback);
-void lt_macos_update_trigger_config(int32_t modifier_kind, bool double_tap_selection);
+void lt_macos_update_trigger_config(
+    int32_t modifier_kind,
+    bool double_tap_selection,
+    uint32_t selection_mods,
+    const char *selection_key,
+    uint32_t capture_mods,
+    const char *capture_key
+);
+void lt_macos_set_shortcut_recording(bool active);
 
 void lt_macos_get_pointer(double *out_x, double *out_y);
 void lt_macos_get_monitor_bounds(double x, double y, double *out_x, double *out_y, double *out_w, double *out_h);

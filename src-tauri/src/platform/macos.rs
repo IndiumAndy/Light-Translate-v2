@@ -5,7 +5,9 @@ use crate::extraction::{
     is_allowed_input_text, ExtractionCompleteness, ExtractionFailure, ExtractionScope,
     ExtractionSnapshot, ExtractionSource, ScreenPoint, ScreenRect,
 };
-use crate::platform::{InputEventCallback, PermissionsStatus, PlatformBackend, PlatformInputEvent};
+use crate::platform::{
+    InputEventCallback, PermissionsStatus, PlatformBackend, PlatformInputEvent, ShortcutSpec,
+};
 use crate::storage::TriggerModifier;
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -15,7 +17,15 @@ use std::sync::LazyLock;
 
 unsafe extern "C" {
     fn lt_macos_start_input_monitor(callback: extern "C" fn(*const c_char));
-    fn lt_macos_update_trigger_config(modifier_kind: i32, double_tap_selection: bool);
+    fn lt_macos_update_trigger_config(
+        modifier_kind: i32,
+        double_tap_selection: bool,
+        selection_mods: u32,
+        selection_key: *const c_char,
+        capture_mods: u32,
+        capture_key: *const c_char,
+    );
+    fn lt_macos_set_shortcut_recording(active: bool);
     fn lt_macos_get_pointer(out_x: *mut f64, out_y: *mut f64);
     fn lt_macos_get_monitor_bounds(
         x: f64,
@@ -151,9 +161,43 @@ impl PlatformBackend for MacOsPlatform {
         }
     }
 
-    fn update_trigger_config(&self, modifier: TriggerModifier, double_tap_selection: bool) {
+    fn update_trigger_config(
+        &self,
+        modifier: TriggerModifier,
+        double_tap_selection: bool,
+        selection_shortcut: &str,
+        capture_shortcut: &str,
+    ) {
+        let (sel_mods, sel_key) = match ShortcutSpec::parse(selection_shortcut) {
+            Some(spec) => (
+                spec.modifier_mask(),
+                CString::new(spec.key).unwrap_or_default(),
+            ),
+            None => (0, CString::default()),
+        };
+        let (cap_mods, cap_key) = match ShortcutSpec::parse(capture_shortcut) {
+            Some(spec) => (
+                spec.modifier_mask(),
+                CString::new(spec.key).unwrap_or_default(),
+            ),
+            None => (0, CString::default()),
+        };
+
         unsafe {
-            lt_macos_update_trigger_config(modifier_to_code(modifier), double_tap_selection);
+            lt_macos_update_trigger_config(
+                modifier_to_code(modifier),
+                double_tap_selection,
+                sel_mods,
+                sel_key.as_ptr(),
+                cap_mods,
+                cap_key.as_ptr(),
+            );
+        }
+    }
+
+    fn set_shortcut_recording(&self, active: bool) {
+        unsafe {
+            lt_macos_set_shortcut_recording(active);
         }
     }
 
