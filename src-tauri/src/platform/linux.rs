@@ -251,6 +251,7 @@ impl PlatformBackend for LinuxPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::PlatformBackend;
 
     #[test]
     fn write_clipboard_reports_not_supported() {
