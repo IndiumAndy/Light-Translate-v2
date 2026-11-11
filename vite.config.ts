@@ -32,6 +32,7 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         popup: resolve(__dirname, "popup.html"),
         capture: resolve(__dirname, "capture.html"),
+        overlay: resolve(__dirname, "overlay.html"),
       },
     },
   },

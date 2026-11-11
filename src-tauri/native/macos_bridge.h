@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -36,12 +37,39 @@ char *lt_macos_extract_hover_ax_json(double x, double y);
 char *lt_macos_ocr_at_point_json(double x, double y, bool sentence_mode);
 char *lt_macos_ocr_region_json(double x, double y, double w, double h);
 
+bool lt_macos_capture_region_rgba(
+    double x,
+    double y,
+    double w,
+    double h,
+    bool encode_jpeg,
+    uint8_t **out_rgba,
+    uint32_t *out_pw,
+    uint32_t *out_ph,
+    uint8_t **out_jpeg,
+    size_t *out_jpeg_len
+);
+char *lt_macos_ocr_rgba_json(
+    const uint8_t *rgba,
+    uint32_t pw,
+    uint32_t ph,
+    double x,
+    double y,
+    double w,
+    double h
+);
+
 void lt_macos_configure_popup_window(void *ns_window_ptr);
 void lt_macos_present_popup_window(void *ns_window_ptr, double x, double y, double w, double h, bool interactive);
 void lt_macos_set_popup_interactive(void *ns_window_ptr, bool interactive);
 void lt_macos_hide_popup_window(void *ns_window_ptr);
 
+void lt_macos_configure_overlay_window(void *ns_window_ptr);
+void lt_macos_present_overlay_window(void *ns_window_ptr, double x, double y, double w, double h);
+void lt_macos_hide_overlay_window(void *ns_window_ptr);
+
 void lt_macos_free_string(char *ptr);
+void lt_macos_free_bytes(uint8_t *ptr);
 
 #ifdef __cplusplus
 }

@@ -120,6 +120,33 @@ fn is_word_joiner(unit: u16) -> bool {
     matches!(unit, 0x0027 | 0x2019 | 0x2018 | 0x002D | 0x2010 | 0x2011)
 }
 
+fn is_cjk_or_kana_hangul(ch: char) -> bool {
+    let code = ch as u32;
+    (0x4E00..=0x9FFF).contains(&code)
+        || (0x3400..=0x4DBF).contains(&code)
+        || (0x3040..=0x30FF).contains(&code)
+        || (0xAC00..=0xD7AF).contains(&code)
+}
+
+/// Returns `true` only when `label` is genuinely a single standalone word or compact <=4-char CJK label,
+/// rather than a multi-word phrase, URL, or multi-segment slug like `#prompt-api-for-gemini-nano-multimodal-input`.
+pub fn is_single_word_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if trimmed.chars().any(is_cjk_or_kana_hangul) {
+        return trimmed.chars().count() <= 4;
+    }
+    let core = trimmed.trim_matches(|c: char| !c.is_alphanumeric());
+    if core.is_empty() || core.matches(['-', '\u{2010}', '\u{2011}']).count() > 1 {
+        return false;
+    }
+    let utf16_len = core.encode_utf16().count();
+    resolve_word_in_utf16(core, Utf16Range::new(0, utf16_len), false)
+        .is_some_and(|(_, word)| word == core)
+}
+
 // ============================================================================
 // Line-Break Normalizer with Bidirectional UTF-16 Mapping
 // ============================================================================
@@ -553,6 +580,17 @@ pub struct OcrPointHit {
     pub sentence_rect: ScreenRect,
 }
 
+/// Semantic text block clustered inside a captured region (coordinates local to the region).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayBlockSeed {
+    pub source_text: String,
+    pub rect: ScreenRect,
+    pub line_rects: Vec<ScreenRect>,
+    pub line_count: usize,
+    pub estimated_font_px: f64,
+}
+
 #[derive(Debug, Clone)]
 struct ColumnRun {
     words: Vec<OcrWord>,
@@ -703,6 +741,210 @@ impl OcrClusterer {
 
         let clean = output.trim().to_string();
         (!clean.is_empty()).then_some(clean)
+    }
+
+    /// Clusters raw OCR lines inside `region` into semantic visual blocks (`OverlayBlockSeed`s)
+    /// for in-place screenshot overlay translation:
+    /// - Consecutive wrapped lines of a paragraph within the same column merge into one block
+    ///   so cross-line sentences translate naturally without fragmented grammar.
+    /// - Headings (distinct font height), bullet items, sidebars, table cells, and UI buttons
+    ///   remain distinct blocks anchored to their exact local bounding rectangles.
+    pub fn cluster_region_blocks(lines: &[OcrLine], region: ScreenRect) -> Vec<OverlayBlockSeed> {
+        let runs = Self::segment_into_runs(lines);
+        if runs.is_empty() || !region.is_valid() {
+            return Vec::new();
+        }
+
+        struct BuildingBlock {
+            runs: Vec<ColumnRun>,
+            union_rect: ScreenRect,
+            left_anchor: f64,
+        }
+
+        fn format_run_line(run: &ColumnRun) -> String {
+            run.words
+                .iter()
+                .map(|w| format!("{}{}", w.text, w.trailing))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string()
+        }
+
+        fn starts_with_list_marker(s: &str) -> bool {
+            let t = s.trim_start();
+            if t.starts_with('•')
+                || t.starts_with('·')
+                || t.starts_with("- ")
+                || t.starts_with("* ")
+            {
+                return true;
+            }
+            let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() && digits.len() <= 3 {
+                let rest = &t[digits.len()..];
+                if rest.starts_with(". ") || rest.starts_with(") ") || rest.starts_with('、') {
+                    return true;
+                }
+            }
+            false
+        }
+
+        let mut groups: Vec<BuildingBlock> = Vec::new();
+
+        for run in runs {
+            let line_str = format_run_line(&run);
+            if line_str.is_empty() {
+                continue;
+            }
+
+            let is_bullet = starts_with_list_marker(&line_str);
+            let mut merged_into = None;
+
+            if !is_bullet {
+                for (idx, grp) in groups.iter().enumerate().rev() {
+                    let prev_run = grp.runs.last().expect("non-empty group");
+                    let h_max = prev_run.rect.height.max(run.rect.height);
+                    let h_min = prev_run.rect.height.min(run.rect.height).max(1.0);
+                    // Do not merge headings with body paragraphs of noticeably different font size
+                    if h_max / h_min > 1.28 {
+                        continue;
+                    }
+
+                    let ref_h = (prev_run.rect.height + run.rect.height) * 0.5;
+                    let v_gap = run.rect.min_y() - prev_run.rect.max_y();
+                    // Tight intra-paragraph spacing: avoids painting over blank gaps between paragraphs
+                    if v_gap < -0.30 * ref_h || v_gap > 0.92 * ref_h {
+                        continue;
+                    }
+
+                    // Horizontal alignment inside the same column
+                    let h_overlap = grp.union_rect.max_x().min(run.rect.max_x())
+                        - grp.union_rect.min_x().max(run.rect.min_x());
+                    if h_overlap <= 0.0 && (run.rect.min_x() - grp.left_anchor).abs() > 2.2 * ref_h
+                    {
+                        continue;
+                    }
+
+                    let left_delta = (run.rect.min_x() - grp.left_anchor).abs();
+                    let pair_left_delta = (run.rect.min_x() - prev_run.rect.min_x()).abs();
+                    if left_delta > 2.4 * ref_h && pair_left_delta > 2.0 * ref_h {
+                        continue;
+                    }
+
+                    // If previous line stopped far short of the column width AND ended with sentence
+                    // punctuation (or was a short standalone label above a much wider line), keep separate
+                    let prev_str = format_run_line(prev_run);
+                    let prev_much_narrower =
+                        grp.runs.len() == 1 && prev_run.rect.width < run.rect.width * 0.52;
+                    let prev_para_end = prev_run.rect.max_x() + 4.5 * ref_h < grp.union_rect.max_x()
+                        && (prev_str.ends_with('.')
+                            || prev_str.ends_with('!')
+                            || prev_str.ends_with('?')
+                            || prev_str.ends_with('。'));
+                    let new_indent = run.rect.min_x() - grp.left_anchor > 1.25 * ref_h
+                        && run.rect.min_x() - prev_run.rect.min_x() > 1.25 * ref_h;
+
+                    if prev_much_narrower || prev_para_end || new_indent {
+                        continue;
+                    }
+
+                    merged_into = Some(idx);
+                    break;
+                }
+            }
+
+            if let Some(idx) = merged_into {
+                let grp = &mut groups[idx];
+                grp.union_rect = grp.union_rect.union(run.rect);
+                grp.left_anchor = grp.left_anchor.min(run.rect.min_x());
+                grp.runs.push(run);
+            } else {
+                groups.push(BuildingBlock {
+                    left_anchor: run.rect.min_x(),
+                    union_rect: run.rect,
+                    runs: vec![run],
+                });
+            }
+        }
+
+        let to_local = |r: ScreenRect| -> ScreenRect {
+            let lx = (r.x - region.x).clamp(0.0, region.width);
+            let ly = (r.y - region.y).clamp(0.0, region.height);
+            let rx = (r.max_x() - region.x).clamp(lx, region.width);
+            let ry = (r.max_y() - region.y).clamp(ly, region.height);
+            ScreenRect::new(lx, ly, (rx - lx).max(1.0), (ry - ly).max(1.0))
+        };
+
+        let mut out = Vec::with_capacity(groups.len());
+        for grp in groups {
+            let mut joined = String::new();
+            let mut heights = Vec::new();
+            let mut line_rects = Vec::with_capacity(grp.runs.len());
+
+            for run in &grp.runs {
+                for w in &run.words {
+                    heights.push(w.rect.height);
+                }
+                line_rects.push(to_local(run.rect));
+                let piece = format_run_line(run);
+                if piece.is_empty() {
+                    continue;
+                }
+                if joined.is_empty() {
+                    joined.push_str(&piece);
+                } else if joined.ends_with('-')
+                    && joined.len() >= 2
+                    && joined[..joined.len() - 1]
+                        .chars()
+                        .last()
+                        .is_some_and(|c| c.is_ascii_alphabetic())
+                    && piece
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_lowercase())
+                {
+                    // Rejoin hyphenated line-wrapped English word ("architec-\nture" -> "architecture")
+                    joined.pop();
+                    joined.push_str(&piece);
+                } else {
+                    let prev_cjk = joined
+                        .chars()
+                        .last()
+                        .is_some_and(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
+                    let next_cjk = piece
+                        .chars()
+                        .next()
+                        .is_some_and(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
+                    if !prev_cjk || !next_cjk {
+                        joined.push(' ');
+                    }
+                    joined.push_str(&piece);
+                }
+            }
+
+            let clean = joined.trim().to_string();
+            if clean.is_empty() {
+                continue;
+            }
+            heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median_word_h = heights
+                .get(heights.len() / 2)
+                .copied()
+                .unwrap_or(grp.union_rect.height)
+                .max(10.0);
+            let estimated_font_px = (median_word_h * 0.84).clamp(10.5, 42.0);
+
+            out.push(OverlayBlockSeed {
+                source_text: clean,
+                rect: to_local(grp.union_rect),
+                line_count: line_rects.len().max(1),
+                line_rects,
+                estimated_font_px,
+            });
+        }
+
+        out
     }
 
     /// Split raw OCR lines by wide horizontal gaps into distinct column runs,
@@ -1089,5 +1331,55 @@ mod tests {
             Some("Cross-platform translation bridges native accessibility trees and local OCR instantly.")
         );
         assert_eq!(hit.sentence_completeness, ExtractionCompleteness::Complete);
+    }
+
+    #[test]
+    fn region_block_clusterer_keeps_headings_and_buttons_separate_while_merging_paragraphs() {
+        let region = ScreenRect::new(100.0, 100.0, 600.0, 300.0);
+        let lines = vec![
+            // Large heading (height 26pt)
+            OcrLine {
+                text: "Release Notes".into(),
+                words: vec![
+                    mk_word("Release", "", 120.0, 115.0, 95.0, 26.0),
+                    mk_word("Notes", "", 222.0, 115.0, 75.0, 26.0),
+                ],
+            },
+            // Two-line body paragraph (height 15pt, v_gap = 6pt) + right-side button on same Y!
+            OcrLine {
+                text: "Native screenshot overlay translates English Cancel".into(),
+                words: vec![
+                    mk_word("Native", "", 120.0, 160.0, 52.0, 15.0),
+                    mk_word("screenshot", "", 177.0, 160.0, 82.0, 15.0),
+                    mk_word("overlay", "", 264.0, 160.0, 58.0, 15.0),
+                    mk_word("translates", "", 327.0, 160.0, 74.0, 15.0),
+                    mk_word("English", "", 406.0, 160.0, 58.0, 15.0),
+                    // Separate UI button on the right (x=560)
+                    mk_word("Cancel", "", 560.0, 160.0, 55.0, 15.0),
+                ],
+            },
+            OcrLine {
+                text: "directly over original text.".into(),
+                words: vec![
+                    mk_word("directly", "", 120.0, 181.0, 58.0, 15.0),
+                    mk_word("over", "", 183.0, 181.0, 36.0, 15.0),
+                    mk_word("original", "", 224.0, 181.0, 58.0, 15.0),
+                    mk_word("text", ".", 287.0, 181.0, 34.0, 15.0),
+                ],
+            },
+        ];
+
+        let blocks = OcrClusterer::cluster_region_blocks(&lines, region);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].source_text, "Release Notes");
+        assert_eq!(blocks[0].line_count, 1);
+        assert_eq!(
+            blocks[1].source_text,
+            "Native screenshot overlay translates English directly over original text."
+        );
+        assert_eq!(blocks[1].line_count, 2);
+        // Verify coordinates are local to `region` (120 - 100 = 20)
+        assert!((blocks[1].rect.x - 20.0).abs() < 0.01);
+        assert_eq!(blocks[2].source_text, "Cancel");
     }
 }

@@ -209,12 +209,12 @@ function PopupApp() {
                 <div className="select-text text-[14.5px] leading-[1.58] font-normal text-[var(--lt-ink-primary)] break-words whitespace-pre-wrap">
                   {primaryTranslation}
                   {card.isStreaming && (
-                    <span className="inline-block w-[5px] h-[14px] ml-1 align-[-2px] rounded-[2px] bg-[#0A84FF] animate-pulse motion-reduce:animate-none" />
+                    <span className="inline-block w-[5px] h-[14px] ml-1 align-[-2px] rounded-[1.5px] bg-[var(--lt-ink-primary)] animate-pulse motion-reduce:animate-none" />
                   )}
                 </div>
               ) : card.isStreaming ? (
                 <div className="flex items-center gap-2 text-[13px] text-[var(--lt-ink-muted)] py-0.5 whitespace-nowrap">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#0A84FF] animate-pulse motion-reduce:animate-none" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--lt-ink-primary)] animate-pulse motion-reduce:animate-none" />
                   <span>翻译中…</span>
                 </div>
               ) : null}
@@ -230,15 +230,15 @@ function PopupApp() {
           {/* On-Demand Contextual AI Explanation (tonal inset, never glass-on-glass) */}
           {(card.isExplaining || card.explanation || card.explanationError) && (
             <div className="mt-2.5 rounded-[11px] px-3 py-2 bg-[var(--lt-surface-subtle)] space-y-1">
-              <div className="text-[11px] font-medium text-[var(--lt-ink-muted)] flex items-center gap-1 whitespace-nowrap">
-                <Sparkles className="w-3 h-3 text-[#0A84FF]" />
+              <div className="text-[11px] font-medium text-[var(--lt-ink-secondary)] flex items-center gap-1 whitespace-nowrap">
+                <Sparkles className="w-3 h-3 text-[var(--lt-ink-primary)]" />
                 <span>AI 语境解析</span>
               </div>
               {card.explanation ? (
                 <div className="select-text text-[13px] leading-[1.56] text-[var(--lt-ink-primary)] whitespace-pre-wrap break-words">
                   {card.explanation}
                   {card.isExplaining && (
-                    <span className="inline-block w-[5px] h-[12px] ml-1 align-[-1px] rounded-[2px] bg-[#0A84FF] animate-pulse motion-reduce:animate-none" />
+                    <span className="inline-block w-[5px] h-[12px] ml-1 align-[-1px] rounded-[1.5px] bg-[var(--lt-ink-primary)] animate-pulse motion-reduce:animate-none" />
                   )}
                 </div>
               ) : card.isExplaining ? (
@@ -264,7 +264,7 @@ function PopupApp() {
                     title="翻译所在整句"
                     aria-label="翻译所在整句"
                     onClick={() => invoke("popup_expand_sentence")}
-                    className="h-7 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 shrink-0 bg-[#007AFF]/[0.12] dark:bg-[#0A84FF]/[0.22] text-[#0062CC] dark:text-[#70BCFF] hover:bg-[#007AFF]/[0.20] dark:hover:bg-[#0A84FF]/[0.32] transition-colors cursor-pointer"
+                    className="h-7 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 shrink-0 bg-[var(--lt-accent-bg)] text-[var(--lt-accent-fg)] hover:opacity-90 active:scale-[0.98] transition-all cursor-pointer"
                   >
                     <TextQuote className="w-3.5 h-3.5 shrink-0" />
                     <span>译整句</span>
@@ -284,9 +284,9 @@ function PopupApp() {
                   title="AI 语境解析"
                   aria-label="AI 语境解析"
                   onClick={() => invoke("popup_explain")}
-                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center transition-colors cursor-pointer ${
+                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center active:scale-[0.96] transition-all cursor-pointer ${
                     card.isExplaining || card.explanation
-                      ? "text-[#0062CC] dark:text-[#70BCFF] bg-[#007AFF]/[0.12] dark:bg-[#0A84FF]/[0.20]"
+                      ? "text-[var(--lt-ink-primary)] bg-[var(--lt-surface-active)]"
                       : "text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)]"
                   }`}
                 >
@@ -298,10 +298,10 @@ function PopupApp() {
                   title="复制译文"
                   aria-label="复制译文"
                   onClick={handleCopy}
-                  className="w-7 h-7 rounded-[8px] inline-flex items-center justify-center text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)] transition-colors cursor-pointer"
+                  className="w-7 h-7 rounded-[8px] inline-flex items-center justify-center text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)] active:scale-[0.96] transition-all cursor-pointer"
                 >
                   {copied ? (
-                    <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <Check className="w-3.5 h-3.5 text-[var(--lt-ink-primary)]" />
                   ) : (
                     <Copy className="w-3.5 h-3.5" />
                   )}
@@ -312,9 +312,9 @@ function PopupApp() {
                   title="收藏词条"
                   aria-label="收藏词条"
                   onClick={handleSave}
-                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center transition-colors cursor-pointer ${
+                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center active:scale-[0.96] transition-all cursor-pointer ${
                     card.saved
-                      ? "text-amber-600 dark:text-amber-400 bg-amber-500/[0.14]"
+                      ? "text-[var(--lt-ink-primary)] bg-[var(--lt-surface-active)]"
                       : "text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)]"
                   }`}
                 >
@@ -329,9 +329,9 @@ function PopupApp() {
                   title={card.pinned ? "取消固定" : "固定浮窗"}
                   aria-label={card.pinned ? "取消固定" : "固定浮窗"}
                   onClick={() => invoke("popup_toggle_pin")}
-                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center transition-colors cursor-pointer ${
+                  className={`w-7 h-7 rounded-[8px] inline-flex items-center justify-center active:scale-[0.96] transition-all cursor-pointer ${
                     card.pinned
-                      ? "text-[#0062CC] dark:text-[#70BCFF] bg-[#007AFF]/[0.14] dark:bg-[#0A84FF]/[0.24]"
+                      ? "text-[var(--lt-accent-fg)] bg-[var(--lt-accent-bg)]"
                       : "text-[var(--lt-ink-secondary)] hover:bg-[var(--lt-control-hover)]"
                   }`}
                 >

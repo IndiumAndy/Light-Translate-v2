@@ -61,6 +61,12 @@ void lt_macos_free_string(char *ptr) {
     }
 }
 
+void lt_macos_free_bytes(uint8_t *ptr) {
+    if (ptr) {
+        free(ptr);
+    }
+}
+
 static CGFloat lt_primary_screen_height(void) {
     CGRect bounds = CGDisplayBounds(CGMainDisplayID());
     return bounds.size.height > 0 ? bounds.size.height : 900.0;
@@ -748,7 +754,9 @@ static bool lt_ax_range_for_position(AXUIElementRef elem, CGPoint pt, CFRange *o
     if (AXUIElementCopyParameterizedAttributeValue(elem, kAXRangeForPositionParameterizedAttribute, param, &val) == kAXErrorSuccess && val) {
         if (CFGetTypeID(val) == AXValueGetTypeID()) {
             CFRange r = CFRangeMake(0, 0);
-            if (AXValueGetValue((AXValueRef)val, kAXValueCFRangeType, &r) && r.location >= 0 && r.length >= 0) {
+            // Zero-length CFRange(loc, 0) means the element has no character glyph mapping at `pt`
+            // (e.g. Chrome `chrome://flags` headings returning {0, 0}) and must never be treated as a hit.
+            if (AXValueGetValue((AXValueRef)val, kAXValueCFRangeType, &r) && r.location >= 0 && r.length > 0) {
                 *outRange = r;
                 ok = true;
             }
@@ -757,6 +765,113 @@ static bool lt_ax_range_for_position(AXUIElementRef elem, CGPoint pt, CFRange *o
     }
     CFRelease(param);
     return ok;
+}
+
+static bool lt_ax_has_verified_range_at_point(
+    AXUIElementRef elem,
+    CGPoint pt,
+    CFRange *outRange,
+    CGRect *outCharBounds,
+    bool *outHasCharBounds
+) {
+    CFRange r = CFRangeMake(0, 0);
+    if (!lt_ax_range_for_position(elem, pt, &r) || r.length > 128) {
+        return false;
+    }
+
+    CGRect b = CGRectZero;
+    if (lt_ax_bounds_for_range(elem, r, &b)) {
+        // Reject clamped / bogus character hits far away from the actual cursor position.
+        if (!CGRectContainsPoint(CGRectInset(b, -24.0, -14.0), pt)) {
+            return false;
+        }
+        if (outRange) *outRange = r;
+        if (outCharBounds) *outCharBounds = b;
+        if (outHasCharBounds) *outHasCharBounds = true;
+        return true;
+    }
+
+    CGRect frame = CGRectZero;
+    if (lt_ax_frame(elem, &frame)) {
+        if (!CGRectContainsPoint(CGRectInset(frame, -8.0, -8.0), pt)) {
+            return false;
+        }
+        // Without BoundsForRange, guard against controls that clamp unmapped points to index 0.
+        if (r.location == 0 && frame.size.width > 80.0 && (pt.x - frame.origin.x) > 48.0) {
+            return false;
+        }
+    }
+
+    if (outRange) *outRange = r;
+    if (outCharBounds) *outCharBounds = CGRectZero;
+    if (outHasCharBounds) *outHasCharBounds = false;
+    return true;
+}
+
+static bool lt_is_word_unichar(unichar ch) {
+    if (ch < 128) {
+        return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+    }
+    return [[NSCharacterSet alphanumericCharacterSet] characterIsMember:ch];
+}
+
+static bool lt_is_word_joiner_unichar(unichar ch) {
+    return ch == '\'' || ch == 0x2019 || ch == 0x2018 || ch == '-' || ch == 0x2010 || ch == 0x2011;
+}
+
+static bool lt_utf16_word_range_at(NSString *text, NSInteger hitOffset, NSInteger hitLen, CFRange *outWordRange) {
+    NSInteger len = (NSInteger)text.length;
+    if (!text || len <= 0 || hitOffset < 0 || hitOffset >= len) return false;
+
+    NSInteger anchor = -1;
+    if (lt_is_word_unichar([text characterAtIndex:(NSUInteger)hitOffset])) {
+        anchor = hitOffset;
+    }
+    if (anchor < 0 && hitLen > 1) {
+        NSInteger scanEnd = MIN(len, hitOffset + hitLen);
+        for (NSInteger i = hitOffset; i < scanEnd; i++) {
+            if (lt_is_word_unichar([text characterAtIndex:(NSUInteger)i])) {
+                anchor = i;
+                break;
+            }
+        }
+    }
+    if (anchor < 0) {
+        if (hitOffset > 0 && lt_is_word_unichar([text characterAtIndex:(NSUInteger)(hitOffset - 1)])) {
+            anchor = hitOffset - 1;
+        } else if (hitOffset + 1 < len && lt_is_word_unichar([text characterAtIndex:(NSUInteger)(hitOffset + 1)])) {
+            anchor = hitOffset + 1;
+        }
+    }
+    if (anchor < 0) return false;
+
+    NSInteger start = anchor;
+    while (start > 0 && lt_is_word_unichar([text characterAtIndex:(NSUInteger)(start - 1)])) {
+        start--;
+    }
+    NSInteger end = anchor + 1;
+    while (end < len && lt_is_word_unichar([text characterAtIndex:(NSUInteger)end])) {
+        end++;
+    }
+    while (end + 1 < len &&
+           lt_is_word_joiner_unichar([text characterAtIndex:(NSUInteger)end]) &&
+           lt_is_word_unichar([text characterAtIndex:(NSUInteger)(end + 1)])) {
+        end++;
+        while (end < len && lt_is_word_unichar([text characterAtIndex:(NSUInteger)end])) {
+            end++;
+        }
+    }
+    while (start >= 2 &&
+           lt_is_word_joiner_unichar([text characterAtIndex:(NSUInteger)(start - 1)]) &&
+           lt_is_word_unichar([text characterAtIndex:(NSUInteger)(start - 2)])) {
+        start--;
+        while (start > 0 && lt_is_word_unichar([text characterAtIndex:(NSUInteger)(start - 1)])) {
+            start--;
+        }
+    }
+
+    if (outWordRange) *outWordRange = CFRangeMake(start, end - start);
+    return end > start;
 }
 
 static CFIndex lt_ax_char_count(AXUIElementRef elem) {
@@ -830,8 +945,7 @@ static NSString *lt_clipboard_fallback_copy(void) {
 }
 
 char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_fallback) {
-    (void)x;
-    (void)y;
+    CGPoint pt = CGPointMake(x, y);
     if (!AXIsProcessTrusted()) {
         return lt_json_encode(@{ @"status": @"permissionDenied" });
     }
@@ -867,12 +981,16 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
         NSString *selText = lt_ax_string(focused, kAXSelectedTextAttribute);
         CGRect selBounds = CGRectZero;
         bool hasBounds = false;
+        CFRange selectedRange = CFRangeMake(0, 0);
+        bool hasSelectedRange = false;
 
         CFTypeRef rangeRef = NULL;
         if (AXUIElementCopyAttributeValue(focused, kAXSelectedTextRangeAttribute, &rangeRef) == kAXErrorSuccess && rangeRef) {
             if (CFGetTypeID(rangeRef) == AXValueGetTypeID()) {
                 CFRange r = CFRangeMake(0, 0);
-                if (AXValueGetValue((AXValueRef)rangeRef, kAXValueCFRangeType, &r) && r.length > 0) {
+                if (AXValueGetValue((AXValueRef)rangeRef, kAXValueCFRangeType, &r) && r.location >= 0 && r.length > 0) {
+                    selectedRange = r;
+                    hasSelectedRange = true;
                     if (!selText || selText.length == 0) {
                         selText = lt_ax_string_for_range(focused, r);
                     }
@@ -880,6 +998,19 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
                 }
             }
             CFRelease(rangeRef);
+        }
+
+        bool pointerInside = false;
+        if (hasBounds && CGRectContainsPoint(CGRectInset(selBounds, -6.0, -6.0), pt)) {
+            pointerInside = true;
+            // Refine against multi-line union bounding boxes when character-index mapping is supported.
+            CFRange ptRange = CFRangeMake(0, 0);
+            if (hasSelectedRange && lt_ax_range_for_position(focused, pt, &ptRange)) {
+                if (ptRange.location < selectedRange.location ||
+                    ptRange.location >= selectedRange.location + selectedRange.length) {
+                    pointerInside = false;
+                }
+            }
         }
 
         CFRelease(focusedRef);
@@ -890,6 +1021,7 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
                 @"status": @"ok",
                 @"text": trimmed,
                 @"source": @"accessibility",
+                @"pointerInside": @(pointerInside),
                 @"appId": appId ?: [NSNull null]
             } mutableCopy];
             if (hasBounds) {
@@ -942,7 +1074,7 @@ static NSString *lt_best_element_text(AXUIElementRef elem, NSString *role) {
     return nil;
 }
 
-// Bounded DFS (max depth 4, max 24 visited nodes) matching child geometry against `pt`
+// Bounded DFS (max depth 4, max 24 visited nodes) matching child geometry & RangeForPosition against `pt`
 static AXUIElementRef lt_find_deepest_text_child_retained(
     AXUIElementRef root,
     CGPoint pt,
@@ -964,6 +1096,7 @@ static AXUIElementRef lt_find_deepest_text_child_retained(
     CFArrayRef children = (CFArrayRef)childrenRef;
     CFIndex count = CFArrayGetCount(children);
     AXUIElementRef bestMatch = NULL;
+    bool bestHasRange = false;
     CGFloat bestArea = CGFLOAT_MAX;
 
     for (CFIndex i = 0; i < count && *visitedBudget > 0; i++) {
@@ -992,19 +1125,32 @@ static AXUIElementRef lt_find_deepest_text_child_retained(
         // Recurse deeper first to prefer exact inline leaf (`<span>`, `<a>`, `AXStaticText`)
         AXUIElementRef deeper = lt_find_deepest_text_child_retained(child, pt, expectedPid, depth + 1, visitedBudget);
         if (deeper) {
-            if (bestMatch) CFRelease(bestMatch);
-            bestMatch = deeper;
-            break;
+            bool candHasRange = lt_ax_has_verified_range_at_point(deeper, pt, NULL, NULL, NULL);
+            CGRect candFrame = CGRectZero;
+            CGFloat candArea = lt_ax_frame(deeper, &candFrame)
+                ? (candFrame.size.width * candFrame.size.height)
+                : (hasFrame ? frame.size.width * frame.size.height : CGFLOAT_MAX - 1.0);
+            if ((candHasRange && !bestHasRange) || (candHasRange == bestHasRange && candArea < bestArea)) {
+                if (bestMatch) CFRelease(bestMatch);
+                bestMatch = deeper;
+                bestHasRange = candHasRange;
+                bestArea = candArea;
+            } else {
+                CFRelease(deeper);
+            }
+            continue;
         }
 
+        bool childHasRange = lt_ax_has_verified_range_at_point(child, pt, NULL, NULL, NULL);
         NSString *role = lt_ax_string(child, kAXRoleAttribute) ?: @"";
         NSString *txt = lt_best_element_text(child, role);
         NSString *trimmed = [txt stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length > 0 && hasFrame) {
-            CGFloat area = frame.size.width * frame.size.height;
-            if (area < bestArea) {
+        if (childHasRange || (trimmed.length > 0 && hasFrame)) {
+            CGFloat area = hasFrame ? (frame.size.width * frame.size.height) : (CGFLOAT_MAX - 1.0);
+            if ((childHasRange && !bestHasRange) || (childHasRange == bestHasRange && area < bestArea)) {
                 if (bestMatch) CFRelease(bestMatch);
                 bestMatch = (AXUIElementRef)CFRetain(child);
+                bestHasRange = childHasRange;
                 bestArea = area;
             }
         }
@@ -1176,11 +1322,13 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
         return lt_json_encode(@{ @"status": @"blockedSensitive", @"appId": appId ?: [NSNull null] });
     }
 
-    // 1. Try direct parameterized range mapping at cursor
+    // 1. Try direct verified parameterized range mapping at cursor
     CFRange charRange = CFRangeMake(0, 0);
-    bool hasRange = lt_ax_range_for_position(hitElem, pt, &charRange);
+    CGRect charBounds = CGRectZero;
+    bool hasCharBounds = false;
+    bool hasRange = lt_ax_has_verified_range_at_point(hitElem, pt, &charRange, &charBounds, &hasCharBounds);
 
-    // 2. If direct element didn't resolve a character range, walk up to 4 levels / 24 children by rect!
+    // 2. If direct element didn't resolve a verified character range, walk up to 4 levels / 24 children by rect!
     if (!hasRange) {
         int budget = 24;
         pid_t targetPid = elemPid > 0 ? elemPid : winHit.pid;
@@ -1188,13 +1336,15 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
         if (deepChild) {
             CFRelease(hitElem);
             hitElem = deepChild;
-            hasRange = lt_ax_range_for_position(hitElem, pt, &charRange);
+            hasRange = lt_ax_has_verified_range_at_point(hitElem, pt, &charRange, &charBounds, &hasCharBounds);
         }
     }
 
     NSString *role = lt_ax_string(hitElem, kAXRoleAttribute) ?: @"";
+    CGRect elemRect = CGRectZero;
+    bool hasElemRect = lt_ax_frame(hitElem, &elemRect);
 
-    if (hasRange && charRange.length <= 128) {
+    if (hasRange && charRange.length > 0 && charRange.length <= 128) {
         CFIndex totalLen = lt_ax_char_count(hitElem);
         CFIndex winStart = charRange.location > 900 ? (charRange.location - 900) : 0;
         CFIndex winLen = 1800;
@@ -1217,12 +1367,21 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
 
         if (windowText.length > 0 && charRange.location >= winStart) {
             NSInteger localOffset = charRange.location - winStart;
-            NSInteger localLen = charRange.length > 0 ? charRange.length : 1;
+            NSInteger localLen = charRange.length;
 
-            CGRect rangeBounds = CGRectZero;
-            bool hasBounds = lt_ax_bounds_for_range(hitElem, charRange, &rangeBounds);
-            if (!hasBounds) {
-                hasBounds = lt_ax_frame(hitElem, &rangeBounds);
+            // Compute exact bounding box of the full enclosing word so popup anchoring & dwell hold
+            // match the hovered word rather than a 1-char glyph or the entire container element.
+            CGRect wordBounds = CGRectZero;
+            bool hasWordBounds = false;
+            CFRange localWordRange = CFRangeMake(0, 0);
+            if (lt_utf16_word_range_at(windowText, localOffset, localLen, &localWordRange)) {
+                CFRange absWordRange = CFRangeMake(winStart + localWordRange.location, localWordRange.length);
+                CGRect wb = CGRectZero;
+                if (lt_ax_bounds_for_range(hitElem, absWordRange, &wb) &&
+                    CGRectContainsPoint(CGRectInset(wb, -24.0, -14.0), pt)) {
+                    wordBounds = wb;
+                    hasWordBounds = true;
+                }
             }
 
             // Check if leaf text is short/fragmented -> climb 1~2 parent paragraph nodes for full sentence!
@@ -1246,12 +1405,37 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
                 resp[@"paragraphText"] = paraAgg[@"paragraphText"];
                 resp[@"paragraphHitOffset"] = paraAgg[@"paragraphHitOffset"];
             }
-            if (hasBounds) {
+            if (hasWordBounds) {
+                resp[@"wordRect"] = @{
+                    @"x": @(wordBounds.origin.x),
+                    @"y": @(wordBounds.origin.y),
+                    @"width": @(wordBounds.size.width),
+                    @"height": @(wordBounds.size.height)
+                };
+            }
+            if (hasCharBounds) {
+                resp[@"charRect"] = @{
+                    @"x": @(charBounds.origin.x),
+                    @"y": @(charBounds.origin.y),
+                    @"width": @(charBounds.size.width),
+                    @"height": @(charBounds.size.height)
+                };
+            }
+            if (hasElemRect) {
+                resp[@"elemRect"] = @{
+                    @"x": @(elemRect.origin.x),
+                    @"y": @(elemRect.origin.y),
+                    @"width": @(elemRect.size.width),
+                    @"height": @(elemRect.size.height)
+                };
+            }
+            CGRect primaryRect = hasWordBounds ? wordBounds : (hasCharBounds ? charBounds : elemRect);
+            if (hasWordBounds || hasCharBounds) {
                 resp[@"rect"] = @{
-                    @"x": @(rangeBounds.origin.x),
-                    @"y": @(rangeBounds.origin.y),
-                    @"width": @(rangeBounds.size.width),
-                    @"height": @(rangeBounds.size.height)
+                    @"x": @(primaryRect.origin.x),
+                    @"y": @(primaryRect.origin.y),
+                    @"width": @(primaryRect.size.width),
+                    @"height": @(primaryRect.size.height)
                 };
             }
 
@@ -1261,8 +1445,6 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
     }
 
     // 3. Bounded short control / link / heading / button label fallback
-    CGRect elemRect = CGRectZero;
-    bool hasElemRect = lt_ax_frame(hitElem, &elemRect);
     NSString *labelText = lt_best_element_text(hitElem, role);
     NSString *trimmedLabel = [labelText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     CFRelease(hitElem);
@@ -1276,12 +1458,14 @@ char *lt_macos_extract_hover_ax_json(double x, double y) {
             @"appId": appId ?: [NSNull null]
         } mutableCopy];
         if (hasElemRect) {
-            resp[@"rect"] = @{
+            NSDictionary *rectDict = @{
                 @"x": @(elemRect.origin.x),
                 @"y": @(elemRect.origin.y),
                 @"width": @(elemRect.size.width),
                 @"height": @(elemRect.size.height)
             };
+            resp[@"elemRect"] = rectDict;
+            resp[@"rect"] = rectDict;
         }
         return lt_json_encode(resp);
     }
@@ -1384,7 +1568,7 @@ static NSArray<NSDictionary *> *lt_run_vision_ocr(CGImageRef cgImage, CGRect scr
     return outLines;
 }
 
-static double lt_display_scale_for_point(CGPoint pt) {
+static bool lt_display_bounds_for_point(CGPoint pt, CGRect *outBounds, double *outScale) {
     uint32_t count = 0;
     if (CGGetActiveDisplayList(0, NULL, &count) == kCGErrorSuccess && count > 0) {
         CGDirectDisplayID displays[32];
@@ -1393,15 +1577,28 @@ static double lt_display_scale_for_point(CGPoint pt) {
             for (uint32_t i = 0; i < cap; i++) {
                 CGRect b = CGDisplayBounds(displays[i]);
                 if (CGRectContainsPoint(b, pt) && b.size.width > 0) {
-                    return (double)CGDisplayPixelsWide(displays[i]) / b.size.width;
+                    if (outBounds) *outBounds = b;
+                    if (outScale) *outScale = (double)CGDisplayPixelsWide(displays[i]) / b.size.width;
+                    return true;
                 }
             }
         }
     }
-    return 2.0;
+    return false;
 }
 
-static CGImageRef lt_sck_capture_window_rect(uint32_t targetWinId, CGRect screenClippedRect) {
+static double lt_display_scale_for_point(CGPoint pt) {
+    double scale = 2.0;
+    lt_display_bounds_for_point(pt, NULL, &scale);
+    return scale;
+}
+
+static CGImageRef lt_sck_capture_window_rect(
+    uint32_t targetWinId,
+    CGPoint anchorPt,
+    CGRect desiredScreenRect,
+    CGRect *outActualScreenRect
+) {
     __block SCShareableContent *shareable = nil;
     dispatch_semaphore_t semContent = dispatch_semaphore_create(0);
     [SCShareableContent getShareableContentExcludingDesktopWindows:NO
@@ -1422,6 +1619,16 @@ static CGImageRef lt_sck_capture_window_rect(uint32_t targetWinId, CGRect screen
     }
     if (!targetWin) return NULL;
 
+    CGRect screenClippedRect = CGRectIntersection(desiredScreenRect, targetWin.frame);
+    CGRect displayBounds = CGRectZero;
+    double scale = 2.0;
+    if (lt_display_bounds_for_point(anchorPt, &displayBounds, &scale)) {
+        screenClippedRect = CGRectIntersection(screenClippedRect, displayBounds);
+    }
+    if (CGRectIsNull(screenClippedRect) || screenClippedRect.size.width < 8.0 || screenClippedRect.size.height < 8.0) {
+        return NULL;
+    }
+
     CGRect localRect = CGRectMake(
         screenClippedRect.origin.x - targetWin.frame.origin.x,
         screenClippedRect.origin.y - targetWin.frame.origin.y,
@@ -1430,7 +1637,6 @@ static CGImageRef lt_sck_capture_window_rect(uint32_t targetWinId, CGRect screen
     );
     if (localRect.size.width < 4.0 || localRect.size.height < 4.0) return NULL;
 
-    double scale = lt_display_scale_for_point(screenClippedRect.origin);
     SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:targetWin];
     SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
     cfg.sourceRect = localRect;
@@ -1450,6 +1656,9 @@ static CGImageRef lt_sck_capture_window_rect(uint32_t targetWinId, CGRect screen
         dispatch_semaphore_signal(semShot);
     }];
     dispatch_semaphore_wait(semShot, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)));
+    if (captured && outActualScreenRect) {
+        *outActualScreenRect = screenClippedRect;
+    }
     return captured;
 }
 
@@ -1534,7 +1743,8 @@ char *lt_macos_ocr_at_point_json(double x, double y, bool sentence_mode) {
         return lt_json_encode(@{ @"status": @"noText" });
     }
 
-    CGImageRef img = lt_sck_capture_window_rect(winHit.window_id, clipped);
+    CGRect actualRegion = clipped;
+    CGImageRef img = lt_sck_capture_window_rect(winHit.window_id, pt, clipped, &actualRegion);
     if (!img) {
         return lt_json_encode(@{ @"status": @"noText" });
     }
@@ -1543,7 +1753,7 @@ char *lt_macos_ocr_at_point_json(double x, double y, bool sentence_mode) {
         return lt_json_encode(@{ @"status": @"noText" });
     }
 
-    NSArray<NSDictionary *> *lines = lt_run_vision_ocr(img, clipped);
+    NSArray<NSDictionary *> *lines = lt_run_vision_ocr(img, actualRegion);
     CFRelease(img);
 
     NSString *appId = lt_bundle_id_for_pid(winHit.pid);
@@ -1568,6 +1778,143 @@ char *lt_macos_ocr_region_json(double x, double y, double w, double h) {
         return lt_json_encode(@{ @"status": @"noText" });
     }
 
+    NSArray<NSDictionary *> *lines = lt_run_vision_ocr(img, region);
+    CFRelease(img);
+
+    return lt_json_encode(@{
+        @"status": @"ok",
+        @"lines": lines
+    });
+}
+
+bool lt_macos_capture_region_rgba(
+    double x,
+    double y,
+    double w,
+    double h,
+    bool encode_jpeg,
+    uint8_t **out_rgba,
+    uint32_t *out_pw,
+    uint32_t *out_ph,
+    uint8_t **out_jpeg,
+    size_t *out_jpeg_len
+) {
+    if (out_rgba) *out_rgba = NULL;
+    if (out_pw) *out_pw = 0;
+    if (out_ph) *out_ph = 0;
+    if (out_jpeg) *out_jpeg = NULL;
+    if (out_jpeg_len) *out_jpeg_len = 0;
+
+    if (!out_rgba || !out_pw || !out_ph) return false;
+    if (!CGPreflightScreenCaptureAccess()) return false;
+
+    CGRect region = CGRectMake(x, y, w, h);
+    if (region.size.width < 4.0 || region.size.height < 4.0) return false;
+
+    CGImageRef img = lt_sck_capture_display_region(region);
+    if (!img) return false;
+
+    size_t pw = CGImageGetWidth(img);
+    size_t ph = CGImageGetHeight(img);
+    if (pw < 4 || ph < 4) {
+        CFRelease(img);
+        return false;
+    }
+
+    size_t byteCount = pw * ph * 4;
+    uint8_t *rgba = (uint8_t *)malloc(byteCount);
+    if (!rgba) {
+        CFRelease(img);
+        return false;
+    }
+
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef ctx = CGBitmapContextCreate(
+        rgba,
+        pw,
+        ph,
+        8,
+        pw * 4,
+        cs,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+    );
+    if (!ctx) {
+        if (cs) CGColorSpaceRelease(cs);
+        free(rgba);
+        CFRelease(img);
+        return false;
+    }
+
+    CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)pw, (CGFloat)ph), img);
+    CGContextRelease(ctx);
+    if (cs) CGColorSpaceRelease(cs);
+
+    if (encode_jpeg && out_jpeg && out_jpeg_len) {
+        @autoreleasepool {
+            NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:img];
+            NSData *jpegData = [rep representationUsingType:NSBitmapImageFileTypeJPEG
+                                                 properties:@{ NSImageCompressionFactor: @(0.90) }];
+            if (jpegData && jpegData.length > 0) {
+                uint8_t *jbuf = (uint8_t *)malloc(jpegData.length);
+                if (jbuf) {
+                    memcpy(jbuf, jpegData.bytes, jpegData.length);
+                    *out_jpeg = jbuf;
+                    *out_jpeg_len = jpegData.length;
+                }
+            }
+        }
+    }
+
+    CFRelease(img);
+    *out_rgba = rgba;
+    *out_pw = (uint32_t)pw;
+    *out_ph = (uint32_t)ph;
+    return true;
+}
+
+char *lt_macos_ocr_rgba_json(
+    const uint8_t *rgba,
+    uint32_t pw,
+    uint32_t ph,
+    double x,
+    double y,
+    double w,
+    double h
+) {
+    if (!rgba || pw < 4 || ph < 4 || w < 4.0 || h < 4.0) {
+        return lt_json_encode(@{ @"status": @"noText" });
+    }
+
+    size_t byteCount = (size_t)pw * (size_t)ph * 4;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, rgba, byteCount, NULL);
+    if (!cs || !provider) {
+        if (provider) CGDataProviderRelease(provider);
+        if (cs) CGColorSpaceRelease(cs);
+        return lt_json_encode(@{ @"status": @"noText" });
+    }
+
+    CGImageRef img = CGImageCreate(
+        pw,
+        ph,
+        8,
+        32,
+        (size_t)pw * 4,
+        cs,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
+        provider,
+        NULL,
+        false,
+        kCGRenderingIntentDefault
+    );
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs);
+
+    if (!img) {
+        return lt_json_encode(@{ @"status": @"noText" });
+    }
+
+    CGRect region = CGRectMake(x, y, w, h);
     NSArray<NSDictionary *> *lines = lt_run_vision_ocr(img, region);
     CFRelease(img);
 
@@ -1751,6 +2098,81 @@ void lt_macos_set_popup_interactive(void *ns_window_ptr, bool interactive) {
 }
 
 void lt_macos_hide_popup_window(void *ns_window_ptr) {
+    if (!ns_window_ptr) return;
+    NSWindow *win = (__bridge NSWindow *)ns_window_ptr;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [win setIgnoresMouseEvents:YES];
+        [win orderOut:nil];
+    });
+}
+
+static void lt_make_webview_transparent(NSWindow *win) {
+    if (!win) return;
+    NSView *rootView = [win contentView];
+    if (!rootView) return;
+    [rootView setWantsLayer:YES];
+    if (rootView.layer) {
+        rootView.layer.backgroundColor = [[NSColor clearColor] CGColor];
+    }
+    for (NSView *sub in [rootView subviews]) {
+        [sub setWantsLayer:YES];
+        if (sub.layer) {
+            sub.layer.backgroundColor = [[NSColor clearColor] CGColor];
+        }
+        @try {
+            [sub setValue:@NO forKey:@"drawsBackground"];
+        } @catch (__unused NSException *ex) {}
+    }
+}
+
+void lt_macos_configure_overlay_window(void *ns_window_ptr) {
+    if (!ns_window_ptr) return;
+    NSWindow *win = (__bridge NSWindow *)ns_window_ptr;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        lt_install_nonactivating_hooks(win);
+        if ([win isKindOfClass:[NSPanel class]]) {
+            [win setStyleMask:([win styleMask] | NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless)];
+            [(NSPanel *)win setFloatingPanel:YES];
+            [(NSPanel *)win setBecomesKeyOnlyIfNeeded:YES];
+        }
+        [win setLevel:NSPopUpMenuWindowLevel + 2];
+        [win setHidesOnDeactivate:NO];
+        [win setOpaque:NO];
+        [win setBackgroundColor:[NSColor clearColor]];
+        [win setHasShadow:NO];
+        [win setAnimationBehavior:NSWindowAnimationBehaviorNone];
+        [win setIgnoresMouseEvents:YES];
+        [win setCollectionBehavior:(NSWindowCollectionBehaviorCanJoinAllSpaces
+                                  | NSWindowCollectionBehaviorFullScreenAuxiliary
+                                  | NSWindowCollectionBehaviorIgnoresCycle
+                                  | NSWindowCollectionBehaviorTransient)];
+        lt_make_webview_transparent(win);
+    });
+}
+
+void lt_macos_present_overlay_window(void *ns_window_ptr, double x, double y, double w, double h) {
+    if (!ns_window_ptr) return;
+    NSWindow *win = (__bridge NSWindow *)ns_window_ptr;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        lt_make_webview_transparent(win);
+        NSRect appKitRect = lt_topleft_rect_to_appkit(x, y, w, h);
+        NSRect prevFrame = [win frame];
+        [win setAlphaValue:1.0];
+        if ([win contentView]) {
+            [[win contentView] setHidden:NO];
+            for (NSView *sub in [[win contentView] subviews]) {
+                [sub setHidden:NO];
+            }
+        }
+        if (!NSEqualRects(prevFrame, appKitRect)) {
+            [win setFrame:appKitRect display:YES animate:NO];
+        }
+        [win setIgnoresMouseEvents:NO];
+        [win orderFrontRegardless];
+    });
+}
+
+void lt_macos_hide_overlay_window(void *ns_window_ptr) {
     if (!ns_window_ptr) return;
     NSWindow *win = (__bridge NSWindow *)ns_window_ptr;
     dispatch_async(dispatch_get_main_queue(), ^{

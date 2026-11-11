@@ -3,41 +3,90 @@ import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  Activity,
+  ArrowRight,
+  BarChart3,
   Bookmark,
   Check,
   Copy,
   Crop,
   Download,
-  Keyboard,
-  KeyRound,
   Languages,
   Plus,
   RotateCcw,
   Search,
   Settings2,
-  ShieldCheck,
-  Sparkles,
   Trash2,
   Upload,
   X,
-  Zap,
 } from "lucide-react";
 import type {
   AppSettings,
   ConnectionTestResult,
+  HeatmapDayCell,
   LlmProviderKind,
   ManualStreamEvent,
   PermissionsStatus,
   QueryMode,
   SavedEntry,
   TriggerModifier,
+  UsageStatsSummary,
   WordEntry,
 } from "../shared/types";
 import "../styles.css";
 
-type ActiveTab = "translate" | "wordbook" | "settings";
+type ActiveTab = "home" | "translate" | "wordbook" | "settings";
 type ShortcutTarget = "capture" | "selection";
+type HeatmapRange = "26w" | "52w";
+
+const WEEKDAY_NAMES_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+function heatmapCellColorClass(level: number): string {
+  switch (level) {
+    case 1:
+      return "bg-zinc-300 dark:bg-zinc-700";
+    case 2:
+      return "bg-zinc-400 dark:bg-zinc-500";
+    case 3:
+      return "bg-zinc-600 dark:bg-zinc-300";
+    case 4:
+      return "bg-zinc-900 dark:bg-zinc-100";
+    default:
+      return "bg-zinc-100 dark:bg-zinc-800/80";
+  }
+}
+
+function buildHeatmapWeeks(cells: HeatmapDayCell[]): (HeatmapDayCell | null)[][] {
+  if (cells.length === 0) return [];
+  const weeks: (HeatmapDayCell | null)[][] = [];
+  let current: (HeatmapDayCell | null)[] = Array(7).fill(null);
+
+  for (const cell of cells) {
+    const rowIdx = Math.max(0, Math.min(6, cell.weekday - 1));
+    if (rowIdx === 0 && current.some((c) => c !== null)) {
+      weeks.push(current);
+      current = Array(7).fill(null);
+    }
+    current[rowIdx] = cell;
+  }
+
+  if (current.some((c) => c !== null)) {
+    weeks.push(current);
+  }
+  return weeks;
+}
+
+function triggerModifierLabel(mod: TriggerModifier | undefined, isMac: boolean): string {
+  switch (mod) {
+    case "leftOption":
+      return isMac ? "左 ⌥ Option" : "左 Alt";
+    case "rightOption":
+      return isMac ? "右 ⌥ Option" : "右 Alt";
+    case "control":
+      return isMac ? "⌃ Control" : "Ctrl";
+    default:
+      return isMac ? "⌥ Option" : "Alt";
+  }
+}
 
 const CODE_TO_KEY_TOKEN: Record<string, string> = {
   Space: "Space",
@@ -68,7 +117,15 @@ function parseShortcutKeycaps(raw: string, isMac: boolean): string[] {
     if (lower === "control" || lower === "ctrl" || lower === "⌃") ctrl = true;
     else if (lower === "alt" || lower === "option" || lower === "opt" || lower === "⌥") alt = true;
     else if (lower === "shift" || lower === "⇧") shift = true;
-    else if (lower === "command" || lower === "cmd" || lower === "meta" || lower === "super" || lower === "win" || lower === "⌘") meta = true;
+    else if (
+      lower === "command" ||
+      lower === "cmd" ||
+      lower === "meta" ||
+      lower === "super" ||
+      lower === "win" ||
+      lower === "⌘"
+    )
+      meta = true;
     else if (lower === "space") keyLabel = "Space";
     else if (lower === "grave" || lower === "backquote") keyLabel = "`";
     else if (lower === "minus") keyLabel = "-";
@@ -81,7 +138,7 @@ function parseShortcutKeycaps(raw: string, isMac: boolean): string[] {
     else if (lower === "comma") keyLabel = ",";
     else if (lower === "period") keyLabel = ".";
     else if (lower === "slash") keyLabel = "/";
-    else keyLabel = part.length === 1 ? part.toUpperCase() : part.toUpperCase();
+    else keyLabel = part.toUpperCase();
   }
 
   if (!keyLabel) return [];
@@ -153,7 +210,7 @@ function extractShortcutFromEvent(
     return {
       canonical: null,
       previewMods,
-      error: "支持字母 A–Z、数字 0–9、F1–F12、空格及常用标点键",
+      error: "支持字母、数字、F1–F12、空格及常用标点键",
     };
   }
 
@@ -162,9 +219,7 @@ function extractShortcutFromEvent(
     return {
       canonical: null,
       previewMods,
-      error: isMac
-        ? "请至少搭配 ⌘ / ⌃ / ⌥ 修饰键（或直接使用 F1–F12）"
-        : "请至少搭配 Ctrl / Alt / Win 修饰键（或直接使用 F1–F12）",
+      error: isMac ? "请搭配 ⌘ / ⌃ / ⌥ 修饰键，或直接使用 F1–F12" : "请搭配 Ctrl / Alt / Win 修饰键，或直接使用 F1–F12",
     };
   }
 
@@ -177,12 +232,24 @@ function extractShortcutFromEvent(
   return { canonical: parts.join("+"), previewMods };
 }
 
+function Keycap({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded border border-zinc-200/90 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs font-sans text-zinc-700 dark:text-zinc-300 tabular-nums">
+      {children}
+    </kbd>
+  );
+}
+
 function MainApp() {
-  const [tab, setTab] = useState<ActiveTab>("translate");
+  const [tab, setTab] = useState<ActiveTab>("home");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [permissions, setPermissions] = useState<PermissionsStatus | null>(null);
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
   const [entries, setEntries] = useState<SavedEntry[]>([]);
+  const [usageStats, setUsageStats] = useState<UsageStatsSummary | null>(null);
+  const [heatmapRange, setHeatmapRange] = useState<HeatmapRange>("26w");
+  const [hoveredDay, setHoveredDay] = useState<HeatmapDayCell | null>(null);
+  const [pinnedDay, setPinnedDay] = useState<HeatmapDayCell | null>(null);
 
   // Manual Translate state
   const [inputText, setInputText] = useState("");
@@ -218,23 +285,30 @@ function MainApp() {
   const defaultSelectionShortcut = isMac ? "Alt+Command+T" : "Alt+Shift+T";
 
   const refreshAll = async () => {
-    const [s, p, ks, list] = await Promise.all([
+    const [s, p, ks, list, stats] = await Promise.all([
       invoke<AppSettings>("get_settings"),
       invoke<PermissionsStatus>("get_permissions_status", { prompt: false }),
       invoke<Record<string, boolean>>("get_api_key_status"),
       invoke<SavedEntry[]>("list_saved_entries"),
+      invoke<UsageStatsSummary>("get_usage_stats"),
     ]);
     setSettings(s);
     setPermissions(p);
     setKeyStatus(ks);
     setEntries(list);
+    setUsageStats(stats);
   };
 
   useEffect(() => {
     refreshAll().catch(() => {});
 
     const unlistenNav = listen<string>("main://navigate", (ev) => {
-      if (ev.payload === "translate" || ev.payload === "wordbook" || ev.payload === "settings") {
+      if (
+        ev.payload === "home" ||
+        ev.payload === "translate" ||
+        ev.payload === "wordbook" ||
+        ev.payload === "settings"
+      ) {
         setTab(ev.payload);
       }
       refreshAll().catch(() => {});
@@ -248,6 +322,13 @@ function MainApp() {
       invoke<SavedEntry[]>("list_saved_entries")
         .then(setEntries)
         .catch(() => {});
+    });
+
+    const unlistenStats = listen<UsageStatsSummary>("stats://updated", (ev) => {
+      setUsageStats(ev.payload);
+      setPinnedDay((prev) =>
+        prev ? ev.payload.heatmap.find((c) => c.date === prev.date) ?? prev : null
+      );
     });
 
     const unlistenManual = listen<ManualStreamEvent>("manual://progress", (ev) => {
@@ -265,6 +346,9 @@ function MainApp() {
       invoke<PermissionsStatus>("get_permissions_status", { prompt: false })
         .then(setPermissions)
         .catch(() => {});
+      invoke<UsageStatsSummary>("get_usage_stats")
+        .then(setUsageStats)
+        .catch(() => {});
     };
     window.addEventListener("focus", onFocus);
 
@@ -273,6 +357,7 @@ function MainApp() {
       unlistenNav.then((f) => f());
       unlistenSettings.then((f) => f());
       unlistenWordbook.then((f) => f());
+      unlistenStats.then((f) => f());
       unlistenManual.then((f) => f());
     };
   }, []);
@@ -344,8 +429,8 @@ function MainApp() {
       ) {
         setShortcutHint(
           recordingTarget === "capture"
-            ? "该快捷键已绑定给「划词选区翻译」，请换一个组合"
-            : "该快捷键已绑定给「框选截图翻译」，请换一个组合"
+            ? "该快捷键已用于「划词翻译」，请换一个组合"
+            : "该快捷键已用于「截屏翻译」，请换一个组合"
         );
         return;
       }
@@ -433,9 +518,9 @@ function MainApp() {
       const count = await invoke<number>("import_saved_entries", { jsonContent: content });
       const list = await invoke<SavedEntry[]>("list_saved_entries");
       setEntries(list);
-      setWordbookNotice(`成功导入 ${count} 条新词条（自动兼容 v1 与 v2 格式）`);
+      setWordbookNotice(`已导入 ${count} 条词条`);
     } catch (err) {
-      setWordbookNotice(`导入失败: ${String(err)}`);
+      setWordbookNotice(`导入失败：${String(err)}`);
     } finally {
       e.target.value = "";
     }
@@ -517,74 +602,130 @@ function MainApp() {
     permissions.platform === "macos" &&
     (!permissions.accessibility || !permissions.screenRecording);
 
+  const visibleHeatmapWeeks = useMemo(() => {
+    const all = buildHeatmapWeeks(usageStats?.heatmap ?? []);
+    return heatmapRange === "26w" ? all.slice(-26) : all;
+  }, [usageStats, heatmapRange]);
+
+  const heatmapMonthMarkers = useMemo(() => {
+    const markers: { colIdx: number; label: string }[] = [];
+    const minColGap = heatmapRange === "26w" ? 2 : 3;
+
+    visibleHeatmapWeeks.forEach((week, colIdx) => {
+      const firstOfMonth = week.find((c) => c?.date.endsWith("-01"));
+      if (firstOfMonth) {
+        const monthNum = parseInt(firstOfMonth.date.slice(5, 7), 10);
+        if (!Number.isNaN(monthNum)) {
+          if (markers.length > 0 && colIdx - markers[markers.length - 1].colIdx < minColGap) {
+            if (markers[markers.length - 1].colIdx === 0) {
+              markers.pop();
+            } else {
+              return;
+            }
+          }
+          markers.push({ colIdx, label: `${monthNum}月` });
+        }
+      } else if (colIdx === 0) {
+        const firstNonNull = week.find((c) => c !== null);
+        if (firstNonNull) {
+          const monthNum = parseInt(firstNonNull.date.slice(5, 7), 10);
+          if (!Number.isNaN(monthNum)) {
+            markers.push({ colIdx: 0, label: `${monthNum}月` });
+          }
+        }
+      }
+    });
+
+    return markers;
+  }, [visibleHeatmapWeeks, heatmapRange]);
+
+  const todayCell =
+    usageStats && usageStats.heatmap.length > 0
+      ? usageStats.heatmap[usageStats.heatmap.length - 1]
+      : null;
+  const inspectedDay = hoveredDay ?? pinnedDay ?? todayCell;
+
+  const weekMetaLabel = useMemo(() => {
+    if (!usageStats) return "—";
+    if (usageStats.lastWeekWords > 0) {
+      const pct = Math.round(
+        ((usageStats.thisWeekWords - usageStats.lastWeekWords) / usageStats.lastWeekWords) * 100
+      );
+      const sign = pct > 0 ? `+${pct}%` : `${pct}%`;
+      return `较前 7 日 ${sign}`;
+    }
+    return `活跃 ${usageStats.activeDays} 天`;
+  }, [usageStats]);
+
+  const navItems: { id: ActiveTab; label: string; icon: React.ComponentType<{ className?: string; strokeWidth?: number }>; badge?: number }[] = [
+    { id: "home", label: "概览", icon: BarChart3 },
+    { id: "translate", label: "翻译", icon: Languages },
+    { id: "wordbook", label: "生词本", icon: Bookmark, badge: entries.length > 0 ? entries.length : undefined },
+    { id: "settings", label: "设置", icon: Settings2 },
+  ];
+
+  const captureCaps = parseShortcutKeycaps(
+    settings?.captureShortcut ?? defaultCaptureShortcut,
+    isMac
+  );
+  const selectionCaps = parseShortcutKeycaps(
+    settings?.selectionShortcut ?? defaultSelectionShortcut,
+    isMac
+  );
+
   return (
-    <div className="h-screen w-screen flex bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 text-[13.5px]">
-      {/* Left Navigation Sidebar (HIG Two-Column Split View) */}
-      <aside className="w-56 shrink-0 border-r border-zinc-200 dark:border-zinc-800/90 bg-zinc-100/80 dark:bg-zinc-900/70 flex flex-col justify-between p-3">
+    <div className="h-screen w-screen flex bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 text-[13px] antialiased">
+      {/* Left Navigation Sidebar */}
+      <aside className="w-52 shrink-0 border-r border-zinc-200/80 dark:border-zinc-800/90 bg-zinc-100/70 dark:bg-zinc-900/60 flex flex-col justify-between p-3">
         <div className="space-y-4">
           <div className="px-2.5 pt-1 flex items-center justify-between">
-            <div>
-              <div className="text-[15px] font-semibold tracking-tight">Light Translate</div>
-              <div className="text-[11px] text-zinc-500 dark:text-zinc-400">2.0 跨平台极速引擎</div>
-            </div>
+            <span className="text-sm font-semibold tracking-[-0.01em] text-zinc-950 dark:text-zinc-50">
+              Light Translate
+            </span>
             {settings && (
               <button
                 type="button"
+                aria-label={settings.enabled ? "全局取词已开启，点击暂停" : "全局取词已暂停，点击开启"}
                 title={settings.enabled ? "全局取词已开启" : "全局取词已暂停"}
                 onClick={() => persistSettings({ ...settings, enabled: !settings.enabled })}
-                className={`w-3 h-3 rounded-full cursor-pointer transition-colors ${
-                  settings.enabled ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-zinc-400"
-                }`}
-              />
+                className="w-6 h-6 -mr-1 rounded-md inline-flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] cursor-pointer transition-colors"
+              >
+                <span
+                  className={`w-2 h-2 rounded-full transition-colors ${
+                    settings.enabled ? "bg-emerald-500" : "bg-zinc-400"
+                  }`}
+                />
+              </button>
             )}
           </div>
 
           <nav className="space-y-1">
-            <button
-              type="button"
-              onClick={() => setTab("translate")}
-              className={`w-full h-9 px-3 rounded-lg flex items-center gap-2.5 font-medium transition-colors cursor-pointer ${
-                tab === "translate"
-                  ? "bg-white dark:bg-zinc-800 text-sky-700 dark:text-sky-300 shadow-xs"
-                  : "text-zinc-700 dark:text-zinc-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
-              }`}
-            >
-              <Languages className="w-4 h-4" />
-              <span>对照翻译</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setTab("wordbook")}
-              className={`w-full h-9 px-3 rounded-lg flex items-center justify-between font-medium transition-colors cursor-pointer ${
-                tab === "wordbook"
-                  ? "bg-white dark:bg-zinc-800 text-sky-700 dark:text-sky-300 shadow-xs"
-                  : "text-zinc-700 dark:text-zinc-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
-              }`}
-            >
-              <span className="flex items-center gap-2.5">
-                <Bookmark className="w-4 h-4" />
-                <span>生词收藏本</span>
-              </span>
-              {entries.length > 0 && (
-                <span className="text-[11px] tabular-nums px-1.5 py-0.2 rounded-full bg-zinc-200/80 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-300">
-                  {entries.length}
-                </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setTab("settings")}
-              className={`w-full h-9 px-3 rounded-lg flex items-center gap-2.5 font-medium transition-colors cursor-pointer ${
-                tab === "settings"
-                  ? "bg-white dark:bg-zinc-800 text-sky-700 dark:text-sky-300 shadow-xs"
-                  : "text-zinc-700 dark:text-zinc-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
-              }`}
-            >
-              <Settings2 className="w-4 h-4" />
-              <span>偏好设置</span>
-            </button>
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const active = tab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setTab(item.id)}
+                  className={`w-full h-9 px-3 rounded-lg flex items-center justify-between font-medium transition-colors cursor-pointer ${
+                    active
+                      ? "bg-white dark:bg-zinc-800 text-zinc-950 dark:text-zinc-50 shadow-2xs ring-1 ring-black/[0.05] dark:ring-white/[0.06]"
+                      : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Icon className="w-4 h-4 shrink-0" strokeWidth={1.75} />
+                    <span>{item.label}</span>
+                  </span>
+                  {item.badge !== undefined && (
+                    <span className="text-xs tabular-nums px-1.5 py-0.5 leading-none rounded-md bg-zinc-200/80 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200">
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </nav>
         </div>
 
@@ -592,14 +733,14 @@ function MainApp() {
           <button
             type="button"
             onClick={() => invoke("start_region_capture")}
-            className="w-full h-9 px-3 rounded-lg border border-zinc-300/80 dark:border-zinc-700/80 bg-white/70 dark:bg-zinc-800/70 hover:bg-white dark:hover:bg-zinc-800 flex items-center justify-between gap-2 text-[12.5px] font-medium cursor-pointer transition-colors whitespace-nowrap"
+            className="w-full h-9 px-3 rounded-lg border border-zinc-200/90 dark:border-zinc-700/80 bg-white dark:bg-zinc-800/80 hover:bg-zinc-50 dark:hover:bg-zinc-800 flex items-center justify-between gap-2 text-[13px] font-medium cursor-pointer transition-colors whitespace-nowrap"
           >
             <span className="inline-flex items-center gap-2 shrink-0">
-              <Crop className="w-3.5 h-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
-              <span>框选截图翻译</span>
+              <Crop className="w-3.5 h-3.5 shrink-0 text-zinc-600 dark:text-zinc-300" strokeWidth={1.75} />
+              <span>截屏翻译</span>
             </span>
             {settings?.captureShortcut && formatShortcutInline(settings.captureShortcut, isMac) && (
-              <kbd className="px-1.5 py-0.5 rounded bg-zinc-200/75 dark:bg-zinc-700/80 text-[11px] font-sans text-zinc-600 dark:text-zinc-300 shrink-0 tabular-nums">
+              <kbd className="px-1.5 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 text-xs font-sans text-zinc-600 dark:text-zinc-300 shrink-0 tabular-nums leading-none">
                 {formatShortcutInline(settings.captureShortcut, isMac)}
               </kbd>
             )}
@@ -609,52 +750,366 @@ function MainApp() {
             <button
               type="button"
               onClick={() => setTab("settings")}
-              className="w-full text-left p-2.5 rounded-lg bg-amber-500/12 border border-amber-500/25 text-amber-800 dark:text-amber-300 text-[11.5px] leading-snug cursor-pointer"
+              className="w-full text-left px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-800 dark:text-amber-300 text-xs leading-snug cursor-pointer transition-colors hover:bg-amber-500/15"
             >
-              部分系统取词/截图权限尚未开启，点击前往授权 →
+              系统权限未完成授权，前往开启 →
             </button>
           )}
         </div>
       </aside>
 
       {/* Right Content Workspace */}
-      <main className="flex-1 overflow-y-auto p-6">
-        {tab === "translate" && (
+      <main className="flex-1 overflow-y-auto px-8 py-6">
+        {tab === "home" && (
           <div className="max-w-3xl mx-auto space-y-5">
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <h1 className="text-[18px] font-semibold tracking-tight">手动对照翻译</h1>
-                <p className="text-[12.5px] text-zinc-500 dark:text-zinc-400">
-                  支持离线词典秒查、百毫秒极速机翻与大模型 SSE 实时流式译入
-                </p>
+            <div className="flex items-center justify-between">
+              <h1 className="text-lg font-semibold tracking-[-0.02em] text-zinc-950 dark:text-zinc-50">
+                概览
+              </h1>
+            </div>
+
+            {/* 4 Stat Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+                <div className="text-xs text-zinc-500 dark:text-zinc-400">今日词数</div>
+                <div className="mt-2 text-[28px] leading-none font-medium tracking-[-0.02em] tabular-nums text-zinc-950 dark:text-zinc-50">
+                  {(usageStats?.todayWords ?? 0).toLocaleString()}
+                </div>
+                <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                  {usageStats?.todayQueries ?? 0} 次查询
+                </div>
               </div>
-              <div className="inline-flex shrink-0 rounded-lg p-0.5 bg-zinc-200/75 dark:bg-zinc-800">
+
+              <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+                <div className="text-xs text-zinc-500 dark:text-zinc-400">连续天数</div>
+                <div className="mt-2 text-[28px] leading-none font-medium tracking-[-0.02em] tabular-nums text-zinc-950 dark:text-zinc-50">
+                  {usageStats?.currentStreak ?? 0}
+                </div>
+                <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                  最长 {usageStats?.longestStreak ?? 0} 天
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+                <div className="text-xs text-zinc-500 dark:text-zinc-400">近 7 日</div>
+                <div className="mt-2 text-[28px] leading-none font-medium tracking-[-0.02em] tabular-nums text-zinc-950 dark:text-zinc-50">
+                  {(usageStats?.thisWeekWords ?? 0).toLocaleString()}
+                </div>
+                <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                  {weekMetaLabel}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+                <div className="text-xs text-zinc-500 dark:text-zinc-400">累计词数</div>
+                <div className="mt-2 text-[28px] leading-none font-medium tracking-[-0.02em] tabular-nums text-zinc-950 dark:text-zinc-50">
+                  {(usageStats?.totalWords ?? 0).toLocaleString()}
+                </div>
+                <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                  {(usageStats?.totalQueries ?? 0).toLocaleString()} 次查询
+                </div>
+              </div>
+            </div>
+
+            {/* Daily Reading Heatmap */}
+            <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">每日记录</h2>
+                <div className="inline-flex shrink-0 rounded-lg p-0.5 bg-zinc-100 dark:bg-zinc-800">
+                  <button
+                    type="button"
+                    onClick={() => setHeatmapRange("26w")}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
+                      heatmapRange === "26w"
+                        ? "bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-2xs"
+                        : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+                    }`}
+                  >
+                    近半年
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHeatmapRange("52w")}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
+                      heatmapRange === "52w"
+                        ? "bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-2xs"
+                        : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+                    }`}
+                  >
+                    全年
+                  </button>
+                </div>
+              </div>
+
+              {visibleHeatmapWeeks.length > 0 ? (
+                <div className="flex items-stretch gap-2 select-none">
+                  {/* Weekday Y-Axis */}
+                  <div className="w-4 shrink-0 flex flex-col pt-5" aria-hidden="true">
+                    <div
+                      className={`flex-1 grid grid-rows-7 ${
+                        heatmapRange === "26w" ? "gap-1" : "gap-0.5"
+                      } text-xs text-zinc-400 dark:text-zinc-500`}
+                    >
+                      <span className="flex items-center leading-none">一</span>
+                      <span />
+                      <span className="flex items-center leading-none">三</span>
+                      <span />
+                      <span className="flex items-center leading-none">五</span>
+                      <span />
+                      <span className="flex items-center leading-none">日</span>
+                    </div>
+                  </div>
+
+                  {/* Month Header + Week Columns */}
+                  <div className="flex-1 min-w-0" onMouseLeave={() => setHoveredDay(null)}>
+                    <div className="relative h-4 mb-1" aria-hidden="true">
+                      {heatmapMonthMarkers.map((m) => (
+                        <span
+                          key={`${m.colIdx}-${m.label}`}
+                          style={{
+                            left: `${(m.colIdx / Math.max(visibleHeatmapWeeks.length, 1)) * 100}%`,
+                          }}
+                          className="absolute top-0 text-xs leading-none text-zinc-400 dark:text-zinc-500 whitespace-nowrap"
+                        >
+                          {m.label}
+                        </span>
+                      ))}
+                    </div>
+
+                    <div
+                      className={`grid ${heatmapRange === "26w" ? "gap-1" : "gap-0.5"}`}
+                      style={{
+                        gridTemplateColumns: `repeat(${Math.max(visibleHeatmapWeeks.length, 1)}, minmax(0, 1fr))`,
+                      }}
+                    >
+                      {visibleHeatmapWeeks.map((week, colIdx) => (
+                        <div
+                          key={colIdx}
+                          className={`grid grid-rows-7 ${
+                            heatmapRange === "26w" ? "gap-1" : "gap-0.5"
+                          }`}
+                        >
+                          {week.map((cell, rowIdx) => {
+                            if (!cell) {
+                              return (
+                                <div
+                                  key={rowIdx}
+                                  className="aspect-square w-full rounded-xs opacity-0 pointer-events-none"
+                                />
+                              );
+                            }
+                            const isToday = cell.date === usageStats?.todayDate;
+                            const isPinned = pinnedDay?.date === cell.date;
+                            const weekdayText =
+                              WEEKDAY_NAMES_ZH[Math.max(0, Math.min(6, cell.weekday - 1))];
+                            return (
+                              <button
+                                key={cell.date}
+                                type="button"
+                                aria-label={`${cell.date} ${weekdayText}：${cell.wordCount} 词，${cell.queryCount} 次查询`}
+                                title={`${cell.date} ${weekdayText} · ${cell.wordCount.toLocaleString()} 词`}
+                                onMouseEnter={() => setHoveredDay(cell)}
+                                onFocus={() => setHoveredDay(cell)}
+                                onBlur={() => setHoveredDay(null)}
+                                onClick={() =>
+                                  setPinnedDay((prev) =>
+                                    prev?.date === cell.date ? null : cell
+                                  )
+                                }
+                                className={`aspect-square w-full rounded-xs cursor-pointer transition-colors hover:ring-1 hover:ring-zinc-900/50 dark:hover:ring-zinc-100/60 ${heatmapCellColorClass(
+                                  cell.level
+                                )} ${
+                                  isPinned
+                                    ? "ring-2 ring-zinc-950 dark:ring-white ring-offset-1 ring-offset-white dark:ring-offset-zinc-900 z-10"
+                                    : isToday
+                                      ? "ring-1 ring-zinc-900/50 dark:ring-zinc-100/60"
+                                      : ""
+                                }`}
+                              />
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-32 flex items-center justify-center text-xs text-zinc-500 dark:text-zinc-400">
+                  暂无记录
+                </div>
+              )}
+
+              {/* Heatmap Readout & Intensity Legend */}
+              <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 min-w-0 tabular-nums text-zinc-500 dark:text-zinc-400">
+                  {inspectedDay ? (
+                    <>
+                      <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                        {inspectedDay.date}{" "}
+                        {WEEKDAY_NAMES_ZH[Math.max(0, Math.min(6, inspectedDay.weekday - 1))]}
+                      </span>
+                      <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                      <span>
+                        <strong className="font-medium text-zinc-900 dark:text-zinc-100">
+                          {inspectedDay.wordCount.toLocaleString()}
+                        </strong>{" "}
+                        词
+                      </span>
+                      <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                      <span>{inspectedDay.queryCount.toLocaleString()} 次查询</span>
+                      {pinnedDay && !hoveredDay && (
+                        <button
+                          type="button"
+                          onClick={() => setPinnedDay(null)}
+                          className="ml-1 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 underline underline-offset-2 cursor-pointer transition-colors"
+                        >
+                          取消固定
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <span>悬停方格查看单日记录</span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1 text-xs text-zinc-400 dark:text-zinc-500 shrink-0 select-none">
+                  <span>少</span>
+                  {[0, 1, 2, 3, 4].map((lv) => (
+                    <span
+                      key={lv}
+                      className={`w-2.5 h-2.5 rounded-xs ${heatmapCellColorClass(lv)}`}
+                    />
+                  ))}
+                  <span>多</span>
+                </div>
+              </div>
+            </section>
+
+            {/* Bottom 2-Column Shortcuts & Recent Wordbook */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Shortcuts Summary */}
+              <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">快捷键</h2>
+                  <button
+                    type="button"
+                    onClick={() => setTab("settings")}
+                    className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 inline-flex items-center gap-0.5 cursor-pointer transition-colors"
+                  >
+                    <span>修改</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                </div>
+
+                <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80 text-[13px]">
+                  <div className="py-2 first:pt-0 flex items-center justify-between gap-3">
+                    <span className="text-zinc-600 dark:text-zinc-400">悬停取词</span>
+                    <Keycap>{triggerModifierLabel(settings?.triggerModifier, isMac)}</Keycap>
+                  </div>
+                  <div className="py-2 flex items-center justify-between gap-3">
+                    <span className="text-zinc-600 dark:text-zinc-400">截屏翻译</span>
+                    {captureCaps.length > 0 ? (
+                      <span className="inline-flex items-center gap-1">
+                        {captureCaps.map((c, idx) => (
+                          <Keycap key={idx}>{c}</Keycap>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-zinc-400">未设置</span>
+                    )}
+                  </div>
+                  <div className="py-2 last:pb-0 flex items-center justify-between gap-3">
+                    <span className="text-zinc-600 dark:text-zinc-400">划词翻译</span>
+                    {selectionCaps.length > 0 ? (
+                      <span className="inline-flex items-center gap-1">
+                        {selectionCaps.map((c, idx) => (
+                          <Keycap key={idx}>{c}</Keycap>
+                        ))}
+                      </span>
+                    ) : settings?.doubleTapSelection ? (
+                      <Keycap>双击修饰键</Keycap>
+                    ) : (
+                      <span className="text-xs text-zinc-400">未设置</span>
+                    )}
+                  </div>
+                </div>
+              </section>
+
+              {/* Recent Saved Words */}
+              <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">最近收藏</h2>
+                  <button
+                    type="button"
+                    onClick={() => setTab("wordbook")}
+                    className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 inline-flex items-center gap-0.5 cursor-pointer transition-colors"
+                  >
+                    <span>全部</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {entries.length > 0 ? (
+                  <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+                    {entries.slice(0, 3).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setTab("wordbook")}
+                        className="w-full py-2 first:pt-0 last:pb-0 flex items-baseline justify-between gap-3 text-left hover:opacity-80 cursor-pointer transition-opacity"
+                      >
+                        <span className="font-medium text-[13px] text-zinc-900 dark:text-zinc-100 truncate">
+                          {item.source}
+                        </span>
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate max-w-[58%]">
+                          {item.translation}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-xs text-zinc-400 dark:text-zinc-500 py-6">
+                    暂无收藏
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        )}
+
+        {tab === "translate" && (
+          <div className="max-w-3xl mx-auto space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <h1 className="text-lg font-semibold tracking-[-0.02em] text-zinc-950 dark:text-zinc-50">
+                翻译
+              </h1>
+              <div className="inline-flex shrink-0 rounded-lg p-0.5 bg-zinc-200/70 dark:bg-zinc-800">
                 <button
                   type="button"
                   onClick={() => setManualMode("selection")}
-                  className={`px-3 py-1 rounded-md text-[12.5px] font-medium whitespace-nowrap cursor-pointer ${
+                  className={`px-3 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
                     manualMode === "selection"
-                      ? "bg-white dark:bg-zinc-900 shadow-xs text-zinc-900 dark:text-zinc-100"
-                      : "text-zinc-600 dark:text-zinc-400"
+                      ? "bg-white dark:bg-zinc-900 shadow-2xs text-zinc-900 dark:text-zinc-100"
+                      : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
                   }`}
                 >
-                  精准互译
+                  译文
                 </button>
                 <button
                   type="button"
                   onClick={() => setManualMode("explanation")}
-                  className={`px-3 py-1 rounded-md text-[12.5px] font-medium whitespace-nowrap cursor-pointer ${
+                  className={`px-3 py-1 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
                     manualMode === "explanation"
-                      ? "bg-white dark:bg-zinc-900 shadow-xs text-zinc-900 dark:text-zinc-100"
-                      : "text-zinc-600 dark:text-zinc-400"
+                      ? "bg-white dark:bg-zinc-900 shadow-2xs text-zinc-900 dark:text-zinc-100"
+                      : "text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
                   }`}
                 >
-                  语境精讲
+                  解析
                 </button>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs overflow-hidden">
+            <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden">
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
@@ -665,12 +1120,12 @@ function MainApp() {
                   }
                 }}
                 rows={5}
-                placeholder="输入或粘贴英文 / 中文段落（按 ⌘/Ctrl + Enter 立即流式翻译）…"
-                className="w-full p-4 bg-transparent resize-none focus:outline-none text-[14px] leading-relaxed select-text"
+                placeholder="输入或粘贴文本"
+                className="w-full p-4 bg-transparent resize-none focus:outline-none text-sm leading-relaxed select-text placeholder:text-zinc-400"
               />
-              <div className="px-4 py-2.5 bg-zinc-50 dark:bg-zinc-900/60 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between gap-3">
-                <span className="text-[11.5px] text-zinc-500 tabular-nums whitespace-nowrap">
-                  {inputText.length} / 5000 字符
+              <div className="px-4 py-2.5 bg-zinc-50/80 dark:bg-zinc-900/60 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between gap-3">
+                <span className="text-xs text-zinc-400 dark:text-zinc-500 tabular-nums whitespace-nowrap">
+                  {inputText.length.toLocaleString()} / 5,000
                 </span>
                 <div className="flex items-center gap-2 shrink-0">
                   {inputText && (
@@ -683,7 +1138,7 @@ function MainApp() {
                         setManualLlm("");
                         setManualError(null);
                       }}
-                      className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg text-[12.5px] text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+                      className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
                     >
                       清空
                     </button>
@@ -692,27 +1147,24 @@ function MainApp() {
                     type="button"
                     onClick={runManualTranslate}
                     disabled={!inputText.trim() || manualStreaming}
-                    className="h-8 px-4 shrink-0 whitespace-nowrap rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-[12.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    className="h-8 px-4 shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white disabled:opacity-40 text-white dark:text-zinc-900 text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    {manualMode === "explanation" ? (
-                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                    ) : (
-                      <Languages className="w-3.5 h-3.5 shrink-0" />
-                    )}
-                    <span>{manualStreaming ? "生成中…" : manualMode === "explanation" ? "解析语境" : "立即翻译"}</span>
+                    <span>
+                      {manualStreaming ? "生成中…" : manualMode === "explanation" ? "开始解析" : "翻译"}
+                    </span>
                   </button>
                 </div>
               </div>
             </div>
 
             {(manualDict || manualFast || manualLlm || manualStreaming || manualError) && (
-              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3 shadow-xs">
+              <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 text-[12px] text-zinc-500 dark:text-zinc-400 min-w-0">
-                    <span className="whitespace-nowrap">译文结果</span>
+                  <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400 min-w-0">
+                    <span className="whitespace-nowrap">结果</span>
                     {manualTtft !== null && (
-                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 tabular-nums whitespace-nowrap">
-                        首字 {manualTtft}ms
+                      <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 tabular-nums whitespace-nowrap">
+                        {manualTtft} ms
                       </span>
                     )}
                   </div>
@@ -726,9 +1178,13 @@ function MainApp() {
                         setManualCopied(true);
                         setTimeout(() => setManualCopied(false), 1400);
                       }}
-                      className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 text-[12px] inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                      className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-md border border-zinc-200 dark:border-zinc-700 text-xs inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
                     >
-                      {manualCopied ? <Check className="w-3.5 h-3.5 shrink-0 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 shrink-0" />}
+                      {manualCopied ? (
+                        <Check className="w-3.5 h-3.5 shrink-0 text-zinc-900 dark:text-zinc-100" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 shrink-0" />
+                      )}
                       <span>复制</span>
                     </button>
                     <button
@@ -744,7 +1200,7 @@ function MainApp() {
                         const list = await invoke<SavedEntry[]>("list_saved_entries");
                         setEntries(list);
                       }}
-                      className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 text-[12px] inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                      className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-md border border-zinc-200 dark:border-zinc-700 text-xs inline-flex items-center gap-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
                     >
                       <Bookmark className="w-3.5 h-3.5 shrink-0" />
                       <span>收藏</span>
@@ -755,9 +1211,9 @@ function MainApp() {
                 {manualDict && (
                   <div className="space-y-1 pb-2 border-b border-zinc-100 dark:border-zinc-800">
                     {manualDict.senses.map((s, i) => (
-                      <div key={i} className="flex items-baseline gap-2 text-[13.5px]">
+                      <div key={i} className="flex items-baseline gap-2 text-[13px]">
                         {s.partOfSpeech && (
-                          <span className="font-mono text-[11.5px] px-1.5 py-0.2 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
+                          <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
                             {s.partOfSpeech}
                           </span>
                         )}
@@ -768,16 +1224,16 @@ function MainApp() {
                 )}
 
                 {(manualLlm || manualFast) && (
-                  <div className="select-text text-[14.5px] leading-[1.65] whitespace-pre-wrap">
+                  <div className="select-text text-sm leading-relaxed whitespace-pre-wrap">
                     {manualLlm || manualFast}
                     {manualStreaming && (
-                      <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-sky-500 animate-pulse" />
+                      <span className="inline-block w-1.5 h-4 ml-0.5 align-middle rounded-xs bg-zinc-900 dark:bg-zinc-100 animate-pulse motion-reduce:animate-none" />
                     )}
                   </div>
                 )}
 
                 {manualError && (
-                  <div className="text-[12.5px] text-rose-600 dark:text-rose-400">{manualError}</div>
+                  <div className="text-xs text-rose-600 dark:text-rose-400">{manualError}</div>
                 )}
               </div>
             )}
@@ -787,12 +1243,9 @@ function MainApp() {
         {tab === "wordbook" && (
           <div className="max-w-3xl mx-auto space-y-4">
             <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <h1 className="text-[18px] font-semibold tracking-tight">生词收藏本</h1>
-                <p className="text-[12.5px] text-zinc-500 dark:text-zinc-400">
-                  保留查词时的真实原句语境，支持无缝导入旧版 SavedEntries.json
-                </p>
-              </div>
+              <h1 className="text-lg font-semibold tracking-[-0.02em] text-zinc-950 dark:text-zinc-50">
+                生词本
+              </h1>
               <div className="flex items-center gap-2 shrink-0">
                 <input
                   ref={fileInputRef}
@@ -804,79 +1257,77 @@ function MainApp() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1.5 text-[12.5px] font-medium cursor-pointer transition-colors"
+                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-colors"
                 >
-                  <Upload className="w-3.5 h-3.5 shrink-0" />
-                  <span>导入 JSON</span>
+                  <Upload className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                  <span>导入</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleExportJson}
                   disabled={entries.length === 0}
-                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50 inline-flex items-center gap-1.5 text-[12.5px] font-medium cursor-pointer transition-colors"
+                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-40 inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-colors"
                 >
-                  <Download className="w-3.5 h-3.5 shrink-0" />
-                  <span>导出备份</span>
+                  <Download className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                  <span>导出</span>
                 </button>
               </div>
             </div>
 
             {wordbookNotice && (
-              <div className="px-3.5 py-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-800 dark:text-sky-300 text-[12.5px]">
+              <div className="px-3 py-2 rounded-lg bg-zinc-100 dark:bg-zinc-800/90 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 text-xs">
                 {wordbookNotice}
               </div>
             )}
 
             <div className="relative">
-              <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" strokeWidth={1.75} />
               <input
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索单词、释义或原句语境…"
-                className="w-full h-9 pl-9 pr-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none focus:border-sky-500 text-[13px]"
+                placeholder="搜索生词或释义"
+                className="w-full h-9 pl-9 pr-3 rounded-lg border border-zinc-200/90 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none focus:border-zinc-900 dark:focus:border-zinc-100 text-[13px] placeholder:text-zinc-400"
               />
             </div>
 
             {filteredEntries.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-zinc-300 dark:border-zinc-800 p-10 text-center text-zinc-500 dark:text-zinc-400">
-                {entries.length === 0
-                  ? "暂无收藏词条。悬停查词后点击浮窗上的书签图标即可收藏，或点击右上角导入旧版 JSON。"
-                  : "没有匹配的搜索结果"}
+              <div className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 py-12 text-center text-xs text-zinc-400 dark:text-zinc-500">
+                {entries.length === 0 ? "暂无生词" : "无匹配结果"}
               </div>
             ) : (
-              <div className="space-y-2.5">
+              <div className="space-y-2">
                 {filteredEntries.map((item) => (
                   <div
                     key={item.id}
-                    className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3.5 flex items-start justify-between gap-4"
+                    className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex items-start justify-between gap-4"
                   >
                     <div className="space-y-1 min-w-0 select-text">
                       <div className="flex items-baseline gap-2.5 flex-wrap">
-                        <span className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-50">
+                        <span className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
                           {item.source}
                         </span>
-                        <span className="text-[13.5px] text-sky-700 dark:text-sky-300">
+                        <span className="text-[13px] text-zinc-600 dark:text-zinc-300">
                           {item.translation}
                         </span>
                       </div>
                       {item.context && (
-                        <div className="text-[12.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
                           {item.context}
                         </div>
                       )}
                     </div>
                     <button
                       type="button"
-                      title="删除词条"
-                      aria-label="删除词条"
+                      title="删除"
+                      aria-label="删除"
                       onClick={async () => {
                         await invoke("delete_saved_entry", { id: item.id });
                         setEntries((prev) => prev.filter((x) => x.id !== item.id));
                       }}
-                      className="w-7 h-7 shrink-0 rounded-lg inline-flex items-center justify-center text-zinc-400 hover:text-rose-600 hover:bg-rose-500/10 cursor-pointer"
+                      className="w-7 h-7 shrink-0 rounded-md inline-flex items-center justify-center text-zinc-400 hover:text-rose-600 hover:bg-rose-500/10 cursor-pointer transition-colors"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
                     </button>
                   </div>
                 ))}
@@ -886,56 +1337,50 @@ function MainApp() {
         )}
 
         {tab === "settings" && settings && activeEndpoint && (
-          <div className="max-w-3xl mx-auto space-y-6 pb-8">
+          <div className="max-w-3xl mx-auto space-y-5 pb-8">
             <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <h1 className="text-[18px] font-semibold tracking-tight">偏好设置</h1>
-                <p className="text-[12.5px] text-zinc-500 dark:text-zinc-400">
-                  所有配置原子落盘，API Key 独立加密存储于系统密钥环 (Keychain / Credential Manager)
-                </p>
-              </div>
+              <h1 className="text-lg font-semibold tracking-[-0.02em] text-zinc-950 dark:text-zinc-50">
+                设置
+              </h1>
               {settingsSavedBanner && (
-                <span className="shrink-0 whitespace-nowrap text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">
-                  ✓ 已自动保存
+                <span className="shrink-0 whitespace-nowrap text-xs text-zinc-500 dark:text-zinc-400">
+                  已保存
                 </span>
               )}
             </div>
 
             {/* Section 1: OS Permissions */}
             {permissions && permissions.platform === "macos" && (
-              <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
-                <div className="flex items-center gap-2 font-semibold text-[14px]">
-                  <ShieldCheck className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
-                  <span>macOS 系统权限状态</span>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-[13px]">辅助功能 (Accessibility)</div>
-                      <div className="text-[11.5px] text-zinc-500">用于全局修饰键监听与无障碍取词</div>
-                    </div>
+              <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
+                <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">系统权限</h2>
+                <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+                  <div className="py-2 first:pt-0 flex items-center justify-between gap-4">
+                    <span className="text-[13px] text-zinc-800 dark:text-zinc-200">辅助功能</span>
                     {permissions.accessibility ? (
-                      <span className="shrink-0 whitespace-nowrap text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
+                      <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+                        已授权
+                      </span>
                     ) : (
                       <button
                         type="button"
                         onClick={async () => {
-                          const p = await invoke<PermissionsStatus>("get_permissions_status", { prompt: true });
+                          const p = await invoke<PermissionsStatus>("get_permissions_status", {
+                            prompt: true,
+                          });
                           setPermissions(p);
                         }}
-                        className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
+                        className="h-7 px-2.5 rounded-md bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white text-white dark:text-zinc-900 text-xs font-medium cursor-pointer transition-colors"
                       >
-                        请求授权
+                        授权
                       </button>
                     )}
                   </div>
-                  <div className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 flex items-center justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-[13px]">屏幕录制 (Screen Recording)</div>
-                      <div className="text-[11.5px] text-zinc-500">用于 PDF/图片离线 Vision OCR 兜底</div>
-                    </div>
+                  <div className="py-2 last:pb-0 flex items-center justify-between gap-4">
+                    <span className="text-[13px] text-zinc-800 dark:text-zinc-200">屏幕录制</span>
                     {permissions.screenRecording ? (
-                      <span className="shrink-0 whitespace-nowrap text-[12px] text-emerald-600 dark:text-emerald-400 font-medium">已就绪</span>
+                      <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+                        已授权
+                      </span>
                     ) : (
                       <button
                         type="button"
@@ -943,9 +1388,9 @@ function MainApp() {
                           const p = await invoke<PermissionsStatus>("request_screen_recording");
                           setPermissions(p);
                         }}
-                        className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-lg bg-sky-600 text-white text-[12px] cursor-pointer"
+                        className="h-7 px-2.5 rounded-md bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white text-white dark:text-zinc-900 text-xs font-medium cursor-pointer transition-colors"
                       >
-                        请求授权
+                        授权
                       </button>
                     )}
                   </div>
@@ -954,24 +1399,22 @@ function MainApp() {
             )}
 
             {/* Section 2: Global Shortcuts */}
-            <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3.5">
+            <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
               <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 font-semibold text-[14px]">
-                  <Keyboard className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
-                  <span>全局快捷键设置</span>
-                </div>
-                <span className="text-[11.5px] text-zinc-500 whitespace-nowrap">
-                  点击快捷键胶囊即可录制 · 按 Esc 取消 · 按 Delete 清空
-                </span>
+                <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">快捷键</h2>
+                {recordingTarget !== null && (
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
+                    Esc 取消 · Delete 清空
+                  </span>
+                )}
               </div>
 
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
                 {(
                   [
                     {
                       target: "capture" as ShortcutTarget,
-                      title: "框选截图翻译",
-                      desc: "拖拽框选屏幕任意区域（PDF 扫描件、图表、截图）进行离线 OCR 与流式翻译",
+                      title: "截屏翻译",
                       value: settings.captureShortcut,
                       defaultValue: defaultCaptureShortcut,
                       onChange: (val: string) =>
@@ -979,8 +1422,7 @@ function MainApp() {
                     },
                     {
                       target: "selection" as ShortcutTarget,
-                      title: "划词选区翻译",
-                      desc: "直接读取当前焦点窗口高亮选中的文本并弹出可交互翻译浮窗",
+                      title: "划词翻译",
                       value: settings.selectionShortcut,
                       defaultValue: defaultSelectionShortcut,
                       onChange: (val: string) =>
@@ -995,12 +1437,11 @@ function MainApp() {
                   return (
                     <div
                       key={item.target}
-                      className="py-2.5 first:pt-0.5 last:pb-0.5 flex items-center justify-between gap-4"
+                      className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-4"
                     >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-medium text-[13px]">{item.title}</div>
-                        <div className="text-[11.5px] text-zinc-500">{item.desc}</div>
-                      </div>
+                      <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                        {item.title}
+                      </span>
 
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
@@ -1010,52 +1451,40 @@ function MainApp() {
                             setRecordingModsPreview([]);
                             setRecordingTarget(isRec ? null : item.target);
                           }}
-                          className={`h-8 px-3 rounded-lg border inline-flex items-center gap-1 text-[12px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-all ${
+                          className={`h-8 px-2.5 rounded-lg border inline-flex items-center gap-1 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                             isRec
-                              ? "border-sky-500 bg-sky-500/10 text-sky-700 dark:text-sky-300 ring-2 ring-sky-500/25"
-                              : "border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/80 hover:border-zinc-400 dark:hover:border-zinc-600 text-zinc-800 dark:text-zinc-100"
+                              ? "border-zinc-900 dark:border-zinc-100 bg-zinc-900/[0.05] dark:bg-white/[0.08] text-zinc-950 dark:text-zinc-50"
+                              : "border-zinc-200 dark:border-zinc-700 bg-zinc-50/80 dark:bg-zinc-800/60 hover:border-zinc-400 dark:hover:border-zinc-600 text-zinc-800 dark:text-zinc-100"
                           }`}
                         >
                           {isRec ? (
                             recordingModsPreview.length > 0 ? (
                               <span className="inline-flex items-center gap-1">
                                 {recordingModsPreview.map((m, idx) => (
-                                  <kbd
-                                    key={idx}
-                                    className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 text-[11.5px] font-sans"
-                                  >
-                                    {m}
-                                  </kbd>
+                                  <Keycap key={idx}>{m}</Keycap>
                                 ))}
-                                <span className="text-sky-600/80 dark:text-sky-300/80">…</span>
+                                <span className="text-zinc-400">…</span>
                               </span>
                             ) : (
-                              <span>请按下组合键…</span>
+                              <span>按下组合键…</span>
                             )
                           ) : caps.length > 0 ? (
-                            caps.map((cap, idx) => (
-                              <kbd
-                                key={idx}
-                                className="px-1.5 py-0.5 rounded bg-white dark:bg-zinc-900 border border-zinc-200/90 dark:border-zinc-700 text-[11.5px] font-sans shadow-2xs"
-                              >
-                                {cap}
-                              </kbd>
-                            ))
+                            caps.map((cap, idx) => <Keycap key={idx}>{cap}</Keycap>)
                           ) : (
-                            <span className="text-zinc-400 dark:text-zinc-500">未设置（点击录制）</span>
+                            <span className="text-zinc-400">点击设置</span>
                           )}
                         </button>
 
                         {item.value && !isRec && (
                           <button
                             type="button"
-                            title="清空快捷键"
-                            aria-label="清空快捷键"
+                            title="清空"
+                            aria-label="清空"
                             onClick={() => {
                               setShortcutHint(null);
                               item.onChange("");
                             }}
-                            className="w-7 h-8 shrink-0 rounded-lg inline-flex items-center justify-center text-zinc-400 hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer transition-colors"
+                            className="w-7 h-8 shrink-0 rounded-md inline-flex items-center justify-center text-zinc-400 hover:text-rose-500 hover:bg-rose-500/10 cursor-pointer transition-colors"
                           >
                             <X className="w-3.5 h-3.5 shrink-0" />
                           </button>
@@ -1069,10 +1498,10 @@ function MainApp() {
                               setShortcutHint(null);
                               item.onChange(item.defaultValue);
                             }}
-                            className="h-8 px-2 shrink-0 whitespace-nowrap rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 cursor-pointer transition-colors"
+                            className="h-8 px-2 shrink-0 whitespace-nowrap rounded-md text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 cursor-pointer transition-colors"
                           >
                             <RotateCcw className="w-3 h-3 shrink-0" />
-                            <span>默认</span>
+                            <span>重置</span>
                           </button>
                         )}
                       </div>
@@ -1082,19 +1511,19 @@ function MainApp() {
               </div>
 
               {shortcutHint && (
-                <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-800 dark:text-amber-300 text-[12px]">
+                <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-800 dark:text-amber-300 text-xs">
                   {shortcutHint}
                 </div>
               )}
             </section>
 
             {/* Section 3: Trigger & Interaction */}
-            <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4">
-              <div className="font-semibold text-[14px]">取词手势与交互</div>
+            <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4">
+              <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">取词与交互</h2>
 
               <div className="grid grid-cols-2 gap-4">
-                <label className="space-y-1 block">
-                  <span className="text-[12.5px] text-zinc-600 dark:text-zinc-400">悬停触发修饰键</span>
+                <label className="space-y-1.5 block">
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400 block">悬停修饰键</span>
                   <select
                     value={settings.triggerModifier}
                     onChange={(e) =>
@@ -1103,19 +1532,22 @@ function MainApp() {
                         triggerModifier: e.target.value as TriggerModifier,
                       })
                     }
-                    className="w-full h-9 px-2.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800"
+                    className="w-full h-9 px-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
                   >
-                    <option value="altOrOption">Option / Alt（左右皆可）</option>
-                    <option value="leftOption">仅左 Option / Left Alt</option>
-                    <option value="rightOption">仅右 Option / Right Alt</option>
-                    <option value="control">Control (Ctrl)</option>
+                    <option value="altOrOption">{isMac ? "Option（左右皆可）" : "Alt（左右皆可）"}</option>
+                    <option value="leftOption">{isMac ? "左 Option" : "左 Alt"}</option>
+                    <option value="rightOption">{isMac ? "右 Option" : "右 Alt"}</option>
+                    <option value="control">{isMac ? "Control" : "Ctrl"}</option>
                   </select>
                 </label>
 
-                <label className="space-y-1 block">
-                  <span className="text-[12.5px] text-zinc-600 dark:text-zinc-400">
-                    悬停响应延迟: <strong className="tabular-nums">{settings.hoverDwellMs} ms</strong>
-                  </span>
+                <label className="space-y-1.5 block">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-500 dark:text-zinc-400">悬停延迟</span>
+                    <span className="font-medium text-zinc-900 dark:text-zinc-100 tabular-nums">
+                      {settings.hoverDwellMs} ms
+                    </span>
+                  </div>
                   <input
                     type="range"
                     min={80}
@@ -1125,16 +1557,18 @@ function MainApp() {
                     onChange={(e) =>
                       persistSettings({ ...settings, hoverDwellMs: Number(e.target.value) })
                     }
-                    className="w-full accent-sky-600 mt-2"
+                    className="w-full accent-zinc-900 dark:accent-zinc-100 mt-2"
                   />
                 </label>
 
                 {!settings.dismissOnTriggerRelease && (
-                  <label className="space-y-1 block col-span-2">
-                    <span className="text-[12.5px] text-zinc-600 dark:text-zinc-400">
-                      松键后卡片驻留时长:{" "}
-                      <strong className="tabular-nums">{(settings.lingerDismissMs / 1000).toFixed(1)} s</strong>
-                    </span>
+                  <label className="space-y-1.5 block col-span-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-zinc-500 dark:text-zinc-400">浮窗驻留时长</span>
+                      <span className="font-medium text-zinc-900 dark:text-zinc-100 tabular-nums">
+                        {(settings.lingerDismissMs / 1000).toFixed(1)} s
+                      </span>
+                    </div>
                     <input
                       type="range"
                       min={1000}
@@ -1144,120 +1578,97 @@ function MainApp() {
                       onChange={(e) =>
                         persistSettings({ ...settings, lingerDismissMs: Number(e.target.value) })
                       }
-                      className="w-full accent-sky-600 mt-2"
+                      className="w-full accent-zinc-900 dark:accent-zinc-100 mt-1"
                     />
                   </label>
                 )}
               </div>
 
-              <div className="space-y-2.5 pt-2 border-t border-zinc-100 dark:border-zinc-800">
-                <label className="flex items-center justify-between gap-4 cursor-pointer">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-[13px]">松开修饰键立即关闭悬停浮窗（按住即看、松开即关）</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      开启后松开 Option/Alt 立即收起悬停卡片；双击修饰键、快捷键或截图框选翻译仍保留可交互浮窗
-                    </div>
-                  </div>
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80 border-t border-zinc-100 dark:border-zinc-800/80 pt-1">
+                <label className="py-2.5 flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                    松开修饰键后立即收起浮窗
+                  </span>
                   <input
                     type="checkbox"
                     checked={settings.dismissOnTriggerRelease}
                     onChange={(e) =>
                       persistSettings({ ...settings, dismissOnTriggerRelease: e.target.checked })
                     }
-                    className="w-4 h-4 shrink-0 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-zinc-900 dark:accent-zinc-100"
                   />
                 </label>
 
-                <label className="flex items-center justify-between gap-4 cursor-pointer">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-[13px]">双击修饰键直接翻译当前选区</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      选中文字后快速双击 Option/Alt，无论鼠标在何处直接弹出轻量浮窗
-                    </div>
-                  </div>
+                <label className="py-2.5 flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                    双击修饰键翻译选中文本
+                  </span>
                   <input
                     type="checkbox"
                     checked={settings.doubleTapSelection}
                     onChange={(e) =>
                       persistSettings({ ...settings, doubleTapSelection: e.target.checked })
                     }
-                    className="w-4 h-4 shrink-0 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-zinc-900 dark:accent-zinc-100"
                   />
                 </label>
 
-                <label className="flex items-center justify-between gap-4 cursor-pointer">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-[13px]">启用本地离线 OCR 自动兜底（推荐）</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      遇到 PDF、Canvas、图片或无映射控件时零延迟调用系统离线 OCR 并按列智能拼句
-                    </div>
-                  </div>
+                <label className="py-2.5 flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                    无障碍受限时使用离线 OCR 识别
+                  </span>
                   <input
                     type="checkbox"
                     checked={settings.enableOcrFallback}
                     onChange={(e) =>
                       persistSettings({ ...settings, enableOcrFallback: e.target.checked })
                     }
-                    className="w-4 h-4 shrink-0 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-zinc-900 dark:accent-zinc-100"
                   />
                 </label>
 
-                <label className="flex items-center justify-between gap-4 cursor-pointer">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-[13px]">选区读取剪贴板备份还原兜底（可选）</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      仅当目标软件不支持无障碍选区时，备份原剪贴板 → 模拟复制 → 30ms 内无感还原（密码框严格跳过）
-                    </div>
-                  </div>
+                <label className="py-2.5 last:pb-0 flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                    无障碍受限时通过剪贴板读取选区
+                  </span>
                   <input
                     type="checkbox"
                     checked={settings.enableClipboardFallback}
                     onChange={(e) =>
                       persistSettings({ ...settings, enableClipboardFallback: e.target.checked })
                     }
-                    className="w-4 h-4 shrink-0 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-zinc-900 dark:accent-zinc-100"
                   />
                 </label>
               </div>
             </section>
 
-            {/* Section 3: Three-Tier Translation Pipeline & Streaming LLM */}
-            <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 font-semibold text-[14px]">
-                  <Zap className="w-4 h-4 text-sky-600 dark:text-sky-400" />
-                  <span>三级并发翻译引擎配置</span>
-                </div>
-              </div>
+            {/* Section 4: Translation Providers */}
+            <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4">
+              <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">翻译服务</h2>
 
-              <div className="space-y-2.5 pb-3 border-b border-zinc-100 dark:border-zinc-800">
-                <label className="flex items-center justify-between gap-4 cursor-pointer">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-[13px]">开启百毫秒极速机器翻译预热层 (80~250ms)</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      在大模型流式生成前先秒出非推理机器直译，彻底消除空白等待
-                    </div>
-                  </div>
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800/80 border-b border-zinc-100 dark:border-zinc-800/80 pb-1">
+                <label className="py-2.5 first:pt-0 flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                    流式翻译前先显示快速机翻
+                  </span>
                   <input
                     type="checkbox"
                     checked={settings.enableFastMt}
                     onChange={(e) => persistSettings({ ...settings, enableFastMt: e.target.checked })}
-                    className="w-4 h-4 shrink-0 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-zinc-900 dark:accent-zinc-100"
                   />
                 </label>
 
-                <label className="flex items-center justify-between gap-4 cursor-pointer">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-[13px]">纯查单词时仅用「离线词典 + 极速机翻」（零 Token 模式）</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      悬停单个词时不消耗大模型额度；点击浮窗 [译整句] 或 [解释] 时仍正常调用大模型
-                    </div>
-                  </div>
+                <label className="py-2.5 flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="text-[13px] text-zinc-800 dark:text-zinc-200">
+                    查单个词时不调用大模型
+                  </span>
                   <input
                     type="checkbox"
                     checked={settings.wordFastOnly}
                     onChange={(e) => persistSettings({ ...settings, wordFastOnly: e.target.checked })}
-                    className="w-4 h-4 shrink-0 accent-sky-600"
+                    className="w-4 h-4 shrink-0 accent-zinc-900 dark:accent-zinc-100"
                   />
                 </label>
               </div>
@@ -1265,9 +1676,9 @@ function MainApp() {
               <div className="grid grid-cols-3 gap-2">
                 {(
                   [
-                    { id: "gemini", label: "Google Gemini" },
+                    { id: "gemini", label: "Gemini" },
                     { id: "deepseek", label: "DeepSeek" },
-                    { id: "openaiCompatible", label: "OpenAI 兼容接口" },
+                    { id: "openaiCompatible", label: "OpenAI 兼容" },
                   ] as { id: LlmProviderKind; label: string }[]
                 ).map((p) => (
                   <button
@@ -1277,10 +1688,10 @@ function MainApp() {
                       setTestResult(null);
                       persistSettings({ ...settings, activeProvider: p.id });
                     }}
-                    className={`h-9 px-2 whitespace-nowrap rounded-xl border text-[12.5px] font-medium cursor-pointer transition-colors ${
+                    className={`h-9 px-3 whitespace-nowrap rounded-lg border text-[13px] font-medium cursor-pointer transition-colors ${
                       settings.activeProvider === p.id
-                        ? "border-sky-500 bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                        : "border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                        ? "border-zinc-900 dark:border-zinc-100 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                        : "border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300"
                     }`}
                   >
                     {p.label}
@@ -1289,41 +1700,40 @@ function MainApp() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <label className="space-y-1 block">
-                  <span className="text-[12px] text-zinc-500">API Base URL</span>
+                <label className="space-y-1.5 block">
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400 block">接口地址</span>
                   <input
                     type="url"
                     value={activeEndpoint.baseUrl}
                     onChange={(e) => updateActiveEndpoint({ baseUrl: e.target.value })}
                     placeholder="https://api.openai.com/v1"
-                    className="w-full h-9 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
+                    className="w-full h-9 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
                   />
                 </label>
 
-                <label className="space-y-1 block">
-                  <span className="text-[12px] text-zinc-500">模型名称 (Model ID)</span>
+                <label className="space-y-1.5 block">
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400 block">模型</span>
                   <input
                     type="text"
                     value={activeEndpoint.model}
                     onChange={(e) => updateActiveEndpoint({ model: e.target.value })}
-                    placeholder="gemini-2.5-flash-lite / deepseek-chat"
-                    className="w-full h-9 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
+                    placeholder="gemini-2.5-flash-lite"
+                    className="w-full h-9 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
                   />
                 </label>
               </div>
 
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[12px]">
-                  <span className="text-zinc-500 flex items-center gap-1">
-                    <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                    <span>
-                      API Key 状态:{" "}
-                      {keyStatus[settings.activeProvider] ? (
-                        <strong className="text-emerald-600 dark:text-emerald-400">已加密保存至系统密钥环</strong>
-                      ) : (
-                        <strong className="text-amber-600 dark:text-amber-400">尚未配置</strong>
-                      )}
-                    </span>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-500 dark:text-zinc-400">API Key</span>
+                  <span
+                    className={
+                      keyStatus[settings.activeProvider]
+                        ? "text-zinc-600 dark:text-zinc-300"
+                        : "text-amber-600 dark:text-amber-400"
+                    }
+                  >
+                    {keyStatus[settings.activeProvider] ? "已配置" : "未配置"}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1332,91 +1742,93 @@ function MainApp() {
                     value={apiKeyDraft}
                     onChange={(e) => setApiKeyDraft(e.target.value)}
                     placeholder={
-                      keyStatus[settings.activeProvider]
-                        ? "输入新密钥以覆盖更新（留空保持不变）…"
-                        : "粘贴当前服务商的 API Key…"
+                      keyStatus[settings.activeProvider] ? "输入新密钥以替换" : "输入 API Key"
                     }
-                    className="min-w-0 flex-1 h-9 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px]"
+                    className="min-w-0 flex-1 h-9 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400"
                   />
                   <button
                     type="button"
                     onClick={handleSaveApiKey}
                     disabled={!apiKeyDraft.trim()}
-                    className="h-9 px-3.5 shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 disabled:opacity-40 text-[12.5px] font-medium cursor-pointer"
+                    className="h-9 px-3.5 shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white text-white dark:text-zinc-900 disabled:opacity-40 text-xs font-medium cursor-pointer transition-colors"
                   >
-                    保存密钥
+                    保存
                   </button>
                   <button
                     type="button"
                     onClick={handleTestConnection}
                     disabled={testingConn}
-                    className="h-9 px-3.5 shrink-0 whitespace-nowrap rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300 text-[12.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                    className="h-9 px-3.5 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-800 dark:text-zinc-200 text-xs font-medium cursor-pointer transition-colors"
                   >
-                    <Activity className="w-3.5 h-3.5 shrink-0" />
-                    <span>{testingConn ? "测速中…" : "流式连接自检"}</span>
+                    {testingConn ? "测试中…" : "测试连接"}
                   </button>
                 </div>
               </div>
 
               {testResult && (
                 <div
-                  className={`p-3 rounded-xl text-[12.5px] border ${
+                  className={`px-3 py-2 rounded-lg text-xs border tabular-nums ${
                     testResult.ok
                       ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-800 dark:text-emerald-300"
                       : "bg-rose-500/10 border-rose-500/25 text-rose-700 dark:text-rose-300"
                   }`}
                 >
-                  {testResult.ok ? (
-                    <span>
-                      ✓ 流式连接正常 · 首字响应 (TTFT) <strong>{testResult.ttftMs} ms</strong> · 总耗时{" "}
-                      <strong>{testResult.totalMs} ms</strong> · 示例输出：「{testResult.sampleOutput}」
-                    </span>
-                  ) : (
-                    <span>✕ 连接失败：{testResult.error}</span>
-                  )}
+                  {testResult.ok
+                    ? `连接正常 · 首字 ${testResult.ttftMs} ms · 总计 ${testResult.totalMs} ms`
+                    : `连接失败：${testResult.error}`}
                 </div>
               )}
             </section>
 
-            {/* Section 4: Excluded Applications */}
-            <section className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
-              <div>
-                <div className="font-semibold text-[14px]">排除应用列表</div>
-                <div className="text-[12px] text-zinc-500">
-                  在这些应用中将自动跳过悬停与选区取词（macOS 填 Bundle ID，Windows 填进程名如 KeePassXC.exe）
-                </div>
-              </div>
+            {/* Section 5: Excluded Applications */}
+            <section className="rounded-xl border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3">
+              <h2 className="text-sm font-medium text-zinc-950 dark:text-zinc-50">排除应用</h2>
 
-              <div className="flex flex-wrap gap-2">
-                {settings.excludedApps.map((appId) => (
-                  <span
-                    key={appId}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-[12px] font-mono"
-                  >
-                    <span>{appId}</span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        persistSettings({
-                          ...settings,
-                          excludedApps: settings.excludedApps.filter((x) => x !== appId),
-                        })
-                      }
-                      className="text-zinc-400 hover:text-rose-500 cursor-pointer"
+              {settings.excludedApps.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {settings.excludedApps.map((appId) => (
+                    <span
+                      key={appId}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-100 dark:bg-zinc-800 text-xs font-mono text-zinc-700 dark:text-zinc-300"
                     >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
+                      <span>{appId}</span>
+                      <button
+                        type="button"
+                        aria-label={`移除 ${appId}`}
+                        onClick={() =>
+                          persistSettings({
+                            ...settings,
+                            excludedApps: settings.excludedApps.filter((x) => x !== appId),
+                          })
+                        }
+                        className="text-zinc-400 hover:text-rose-500 cursor-pointer transition-colors"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
 
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   value={newExcludedApp}
                   onChange={(e) => setNewExcludedApp(e.target.value)}
-                  placeholder="例如 com.apple.Terminal 或 code.exe"
-                  className="min-w-0 flex-1 h-8 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-[12.5px] font-mono"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const clean = newExcludedApp.trim();
+                      if (!clean || settings.excludedApps.includes(clean)) return;
+                      setNewExcludedApp("");
+                      persistSettings({
+                        ...settings,
+                        excludedApps: [...settings.excludedApps, clean],
+                      });
+                    }
+                  }}
+                  placeholder={isMac ? "输入 Bundle ID，如 com.apple.Terminal" : "输入进程名，如 code.exe"}
+                  className="min-w-0 flex-1 h-8 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs font-mono placeholder:font-sans placeholder:text-zinc-400"
                 />
                 <button
                   type="button"
@@ -1429,7 +1841,7 @@ function MainApp() {
                       excludedApps: [...settings.excludedApps, clean],
                     });
                   }}
-                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 text-[12.5px] cursor-pointer"
+                  className="h-8 px-3 shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 inline-flex items-center gap-1 text-xs font-medium cursor-pointer transition-colors"
                 >
                   <Plus className="w-3.5 h-3.5 shrink-0" />
                   <span>添加</span>

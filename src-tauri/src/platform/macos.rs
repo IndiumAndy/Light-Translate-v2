@@ -1,10 +1,12 @@
 use crate::extraction::resolver::{
-    resolve_word_in_utf16, OcrClusterer, OcrLine, SentenceResolver, SentenceWindow, Utf16Range,
+    is_single_word_label, resolve_word_in_utf16, OcrClusterer, OcrLine, SentenceResolver,
+    SentenceWindow, Utf16Range,
 };
 use crate::extraction::{
     is_allowed_input_text, ExtractionCompleteness, ExtractionFailure, ExtractionScope,
     ExtractionSnapshot, ExtractionSource, ScreenPoint, ScreenRect,
 };
+use crate::overlay::CapturedImage;
 use crate::platform::{
     InputEventCallback, PermissionsStatus, PlatformBackend, PlatformInputEvent, ShortcutSpec,
 };
@@ -49,6 +51,27 @@ unsafe extern "C" {
     fn lt_macos_extract_hover_ax_json(x: f64, y: f64) -> *mut c_char;
     fn lt_macos_ocr_at_point_json(x: f64, y: f64, sentence_mode: bool) -> *mut c_char;
     fn lt_macos_ocr_region_json(x: f64, y: f64, w: f64, h: f64) -> *mut c_char;
+    fn lt_macos_capture_region_rgba(
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        encode_jpeg: bool,
+        out_rgba: *mut *mut u8,
+        out_pw: *mut u32,
+        out_ph: *mut u32,
+        out_jpeg: *mut *mut u8,
+        out_jpeg_len: *mut usize,
+    ) -> bool;
+    fn lt_macos_ocr_rgba_json(
+        rgba: *const u8,
+        pw: u32,
+        ph: u32,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    ) -> *mut c_char;
     fn lt_macos_configure_popup_window(ns_window_ptr: *mut std::ffi::c_void);
     fn lt_macos_present_popup_window(
         ns_window_ptr: *mut std::ffi::c_void,
@@ -60,7 +83,17 @@ unsafe extern "C" {
     );
     fn lt_macos_set_popup_interactive(ns_window_ptr: *mut std::ffi::c_void, interactive: bool);
     fn lt_macos_hide_popup_window(ns_window_ptr: *mut std::ffi::c_void);
+    fn lt_macos_configure_overlay_window(ns_window_ptr: *mut std::ffi::c_void);
+    fn lt_macos_present_overlay_window(
+        ns_window_ptr: *mut std::ffi::c_void,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    );
+    fn lt_macos_hide_overlay_window(ns_window_ptr: *mut std::ffi::c_void);
     fn lt_macos_free_string(ptr: *mut c_char);
+    fn lt_macos_free_bytes(ptr: *mut u8);
 }
 
 static INPUT_CALLBACK: LazyLock<Mutex<Option<InputEventCallback>>> =
@@ -110,6 +143,8 @@ struct NativeSelectionResponse {
     status: String,
     text: Option<String>,
     source: Option<String>,
+    #[serde(default)]
+    pointer_inside: Option<bool>,
     rect: Option<ScreenRect>,
     app_id: Option<String>,
 }
@@ -118,6 +153,8 @@ struct NativeSelectionResponse {
 #[serde(rename_all = "camelCase")]
 struct NativeHoverAxResponse {
     status: String,
+    #[allow(dead_code)]
+    role: Option<String>,
     window_text: Option<String>,
     window_start: Option<usize>,
     element_total: Option<usize>,
@@ -126,8 +163,210 @@ struct NativeHoverAxResponse {
     paragraph_text: Option<String>,
     paragraph_hit_offset: Option<usize>,
     label: Option<String>,
+    word_rect: Option<ScreenRect>,
+    char_rect: Option<ScreenRect>,
+    elem_rect: Option<ScreenRect>,
     rect: Option<ScreenRect>,
     app_id: Option<String>,
+}
+
+fn resolve_selection_response(
+    resp: NativeSelectionResponse,
+    pointer: ScreenPoint,
+    generation: u64,
+    require_pointer_inside: bool,
+) -> Result<Option<ExtractionSnapshot>, ExtractionFailure> {
+    match resp.status.as_str() {
+        "permissionDenied" => Err(ExtractionFailure::PermissionDenied),
+        "blockedSensitive" => Err(ExtractionFailure::BlockedSensitive),
+        "ok" => {
+            if require_pointer_inside {
+                let inside = match resp.pointer_inside {
+                    Some(flag) => flag,
+                    None => resp
+                        .rect
+                        .is_some_and(|r| r.is_valid() && r.inset_by(-6.0, -6.0).contains(pointer)),
+                };
+                if !inside {
+                    return Ok(None);
+                }
+            }
+            let text = resp.text.unwrap_or_default();
+            if !is_allowed_input_text(&text) {
+                return Err(ExtractionFailure::TooLong);
+            }
+            let source = match resp.source.as_deref() {
+                Some("clipboardFallback") => ExtractionSource::ClipboardFallback,
+                _ => ExtractionSource::Accessibility,
+            };
+            Ok(Some(ExtractionSnapshot {
+                generation,
+                text,
+                context: None,
+                sentence_completeness: None,
+                scope: ExtractionScope::Selection,
+                completeness: ExtractionCompleteness::Complete,
+                source,
+                anchor_rect: resp.rect,
+                pointer,
+                app_id: resp.app_id,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_hover_ax_response(
+    resp: NativeHoverAxResponse,
+    pointer: ScreenPoint,
+    sentence_mode: bool,
+    generation: u64,
+) -> Result<ExtractionSnapshot, ExtractionFailure> {
+    match resp.status.as_str() {
+        "permissionDenied" => Err(ExtractionFailure::PermissionDenied),
+        "blockedSensitive" => Err(ExtractionFailure::BlockedSensitive),
+        "rangeResolved" => {
+            let hit_len = resp.hit_length.unwrap_or(0);
+            if hit_len == 0 || hit_len > 128 {
+                return Err(ExtractionFailure::PositionUnresolved);
+            }
+
+            let hit_offset = resp.hit_offset.unwrap_or(0);
+            let valid_word_rect = resp.word_rect.filter(|r| r.is_valid());
+            let valid_char_rect = resp.char_rect.filter(|r| r.is_valid());
+            let valid_elem_rect = resp
+                .elem_rect
+                .or(resp.rect)
+                .filter(|r| r.is_valid());
+
+            // Geometric verification: reject clamped/bogus character indices far from `pointer`
+            if let Some(cr) = valid_char_rect {
+                if !cr.inset_by(-24.0, -14.0).contains(pointer) {
+                    return Err(ExtractionFailure::PositionUnresolved);
+                }
+            } else if let Some(wr) = valid_word_rect {
+                if !wr.inset_by(-24.0, -14.0).contains(pointer) {
+                    return Err(ExtractionFailure::PositionUnresolved);
+                }
+            } else if let Some(er) = valid_elem_rect {
+                if !er.inset_by(-8.0, -8.0).contains(pointer) {
+                    return Err(ExtractionFailure::PositionUnresolved);
+                }
+                if hit_offset == 0 && er.width > 80.0 && (pointer.x - er.x) > 48.0 {
+                    return Err(ExtractionFailure::PositionUnresolved);
+                }
+            }
+
+            let window_text = resp.window_text.unwrap_or_default();
+            let win_start = resp.window_start.unwrap_or(0);
+
+            // Resolve surrounding sentence first (using parent-aggregated paragraph if leaf was fragmented!)
+            let mut resolved_sentence = SentenceResolver::resolve(
+                &SentenceWindow::bounded(&window_text, win_start, resp.element_total),
+                hit_offset,
+            );
+
+            // Upgrade to cross-node parent paragraph when leaf sentence was incomplete/fragmented
+            if resolved_sentence
+                .as_ref()
+                .is_none_or(|s| s.completeness != ExtractionCompleteness::Complete)
+            {
+                if let (Some(para_text), Some(para_offset)) =
+                    (&resp.paragraph_text, resp.paragraph_hit_offset)
+                {
+                    if let Some(para_sent) = SentenceResolver::resolve(
+                        &SentenceWindow::complete_block(para_text),
+                        para_offset,
+                    ) {
+                        resolved_sentence = Some(para_sent);
+                    }
+                }
+            }
+
+            if sentence_mode {
+                if let Some(sent) = resolved_sentence {
+                    return Ok(ExtractionSnapshot {
+                        generation,
+                        text: sent.text,
+                        context: None,
+                        sentence_completeness: Some(sent.completeness),
+                        scope: ExtractionScope::Sentence,
+                        completeness: sent.completeness,
+                        source: ExtractionSource::Accessibility,
+                        anchor_rect: valid_elem_rect.or(valid_word_rect).or(valid_char_rect),
+                        pointer,
+                        app_id: resp.app_id,
+                    });
+                }
+            }
+
+            // Word extraction with punctuation/space span & ±1 edge tolerance
+            if let Some((_, word)) = resolve_word_in_utf16(
+                &window_text,
+                Utf16Range::new(hit_offset, hit_len),
+                true,
+            ) {
+                let (ctx_text, ctx_comp) = match resolved_sentence {
+                    Some(s) => (Some(s.text), Some(s.completeness)),
+                    None => (None, None),
+                };
+                // Never use a multi-word container's `elem_rect` as a word `anchor_rect`
+                let compact_single_elem = valid_elem_rect.filter(|r| {
+                    is_single_word_label(&window_text) && r.width <= 160.0 && r.height <= 44.0
+                });
+                let word_anchor = valid_word_rect.or(valid_char_rect).or(compact_single_elem);
+
+                return Ok(ExtractionSnapshot {
+                    generation,
+                    text: word,
+                    context: ctx_text,
+                    sentence_completeness: ctx_comp,
+                    scope: ExtractionScope::Word,
+                    completeness: ExtractionCompleteness::Complete,
+                    source: ExtractionSource::Accessibility,
+                    anchor_rect: word_anchor,
+                    pointer,
+                    app_id: resp.app_id,
+                });
+            }
+
+            Err(ExtractionFailure::PositionUnresolved)
+        }
+        "labelResolved" => {
+            let label = resp.label.unwrap_or_default().trim().to_string();
+            if label.is_empty() {
+                return Err(ExtractionFailure::NoText);
+            }
+            let elem_rect = resp.elem_rect.or(resp.rect).filter(|r| r.is_valid());
+            if let Some(er) = elem_rect {
+                if !er.inset_by(-6.0, -6.0).contains(pointer) {
+                    return Err(ExtractionFailure::PositionUnresolved);
+                }
+            }
+            let single_word = is_single_word_label(&label);
+            let scope = if single_word {
+                ExtractionScope::Word
+            } else if sentence_mode {
+                ExtractionScope::Sentence
+            } else {
+                ExtractionScope::Label
+            };
+            Ok(ExtractionSnapshot {
+                generation,
+                text: label,
+                context: None,
+                sentence_completeness: None,
+                scope,
+                completeness: ExtractionCompleteness::Complete,
+                source: ExtractionSource::Accessibility,
+                anchor_rect: elem_rect,
+                pointer,
+                app_id: resp.app_id,
+            })
+        }
+        "notSupported" => Err(ExtractionFailure::NotSupported),
+        _ => Err(ExtractionFailure::PositionUnresolved),
+    }
 }
 
 #[derive(Deserialize)]
@@ -239,33 +478,23 @@ impl PlatformBackend for MacOsPlatform {
         let resp: NativeSelectionResponse =
             serde_json::from_str(&raw).map_err(|_| ExtractionFailure::NoText)?;
 
-        match resp.status.as_str() {
-            "permissionDenied" => Err(ExtractionFailure::PermissionDenied),
-            "blockedSensitive" => Err(ExtractionFailure::BlockedSensitive),
-            "ok" => {
-                let text = resp.text.unwrap_or_default();
-                if !is_allowed_input_text(&text) {
-                    return Err(ExtractionFailure::TooLong);
-                }
-                let source = match resp.source.as_deref() {
-                    Some("clipboardFallback") => ExtractionSource::ClipboardFallback,
-                    _ => ExtractionSource::Accessibility,
-                };
-                Ok(Some(ExtractionSnapshot {
-                    generation,
-                    text,
-                    context: None,
-                    sentence_completeness: None,
-                    scope: ExtractionScope::Selection,
-                    completeness: ExtractionCompleteness::Complete,
-                    source,
-                    anchor_rect: resp.rect,
-                    pointer,
-                    app_id: resp.app_id,
-                }))
-            }
-            _ => Ok(None),
-        }
+        resolve_selection_response(resp, pointer, generation, false)
+    }
+
+    fn extract_hovered_selection(
+        &self,
+        pointer: ScreenPoint,
+        generation: u64,
+    ) -> Result<Option<ExtractionSnapshot>, ExtractionFailure> {
+        let raw = take_owned_string(unsafe {
+            lt_macos_extract_selection_json(pointer.x, pointer.y, false)
+        })
+        .ok_or(ExtractionFailure::NoText)?;
+
+        let resp: NativeSelectionResponse =
+            serde_json::from_str(&raw).map_err(|_| ExtractionFailure::NoText)?;
+
+        resolve_selection_response(resp, pointer, generation, true)
     }
 
     fn extract_hover_accessibility(
@@ -280,108 +509,7 @@ impl PlatformBackend for MacOsPlatform {
         let resp: NativeHoverAxResponse =
             serde_json::from_str(&raw).map_err(|_| ExtractionFailure::PositionUnresolved)?;
 
-        match resp.status.as_str() {
-            "permissionDenied" => Err(ExtractionFailure::PermissionDenied),
-            "blockedSensitive" => Err(ExtractionFailure::BlockedSensitive),
-            "rangeResolved" => {
-                let window_text = resp.window_text.unwrap_or_default();
-                let hit_offset = resp.hit_offset.unwrap_or(0);
-                let hit_len = resp.hit_length.unwrap_or(1).max(1);
-                let win_start = resp.window_start.unwrap_or(0);
-
-                // Resolve surrounding sentence first (using parent-aggregated paragraph if leaf was fragmented!)
-                let mut resolved_sentence = SentenceResolver::resolve(
-                    &SentenceWindow::bounded(&window_text, win_start, resp.element_total),
-                    hit_offset,
-                );
-
-                // Upgrade to cross-node parent paragraph when leaf sentence was incomplete/fragmented
-                if resolved_sentence
-                    .as_ref()
-                    .is_none_or(|s| s.completeness != ExtractionCompleteness::Complete)
-                {
-                    if let (Some(para_text), Some(para_offset)) =
-                        (&resp.paragraph_text, resp.paragraph_hit_offset)
-                    {
-                        if let Some(para_sent) = SentenceResolver::resolve(
-                            &SentenceWindow::complete_block(para_text),
-                            para_offset,
-                        ) {
-                            resolved_sentence = Some(para_sent);
-                        }
-                    }
-                }
-
-                if sentence_mode {
-                    if let Some(sent) = resolved_sentence {
-                        return Ok(ExtractionSnapshot {
-                            generation,
-                            text: sent.text,
-                            context: None,
-                            sentence_completeness: Some(sent.completeness),
-                            scope: ExtractionScope::Sentence,
-                            completeness: sent.completeness,
-                            source: ExtractionSource::Accessibility,
-                            anchor_rect: resp.rect,
-                            pointer,
-                            app_id: resp.app_id,
-                        });
-                    }
-                }
-
-                // Word extraction with punctuation/space span & ±1 edge tolerance
-                if let Some((_, word)) = resolve_word_in_utf16(
-                    &window_text,
-                    Utf16Range::new(hit_offset, hit_len),
-                    true,
-                ) {
-                    let (ctx_text, ctx_comp) = match resolved_sentence {
-                        Some(s) => (Some(s.text), Some(s.completeness)),
-                        None => (None, None),
-                    };
-                    return Ok(ExtractionSnapshot {
-                        generation,
-                        text: word,
-                        context: ctx_text,
-                        sentence_completeness: ctx_comp,
-                        scope: ExtractionScope::Word,
-                        completeness: ExtractionCompleteness::Complete,
-                        source: ExtractionSource::Accessibility,
-                        anchor_rect: resp.rect,
-                        pointer,
-                        app_id: resp.app_id,
-                    });
-                }
-
-                Err(ExtractionFailure::PositionUnresolved)
-            }
-            "labelResolved" => {
-                let label = resp.label.unwrap_or_default();
-                if label.is_empty() {
-                    return Err(ExtractionFailure::NoText);
-                }
-                let word_count = label.split_whitespace().count();
-                let scope = if word_count <= 1 {
-                    ExtractionScope::Word
-                } else {
-                    ExtractionScope::Label
-                };
-                Ok(ExtractionSnapshot {
-                    generation,
-                    text: label,
-                    context: None,
-                    sentence_completeness: None,
-                    scope,
-                    completeness: ExtractionCompleteness::Complete,
-                    source: ExtractionSource::Accessibility,
-                    anchor_rect: resp.rect,
-                    pointer,
-                    app_id: resp.app_id,
-                })
-            }
-            "notSupported" => Err(ExtractionFailure::NotSupported),
-            _ => Err(ExtractionFailure::PositionUnresolved),
-        }
+        resolve_hover_ax_response(resp, pointer, sentence_mode, generation)
     }
 
     fn extract_hover_ocr(
@@ -475,6 +603,96 @@ impl PlatformBackend for MacOsPlatform {
         })
     }
 
+    fn capture_region_image(
+        &self,
+        rect: ScreenRect,
+        include_jpeg_preview: bool,
+    ) -> Option<CapturedImage> {
+        let mut rgba_ptr: *mut u8 = std::ptr::null_mut();
+        let mut pw: u32 = 0;
+        let mut ph: u32 = 0;
+        let mut jpeg_ptr: *mut u8 = std::ptr::null_mut();
+        let mut jpeg_len: usize = 0;
+
+        let ok = unsafe {
+            lt_macos_capture_region_rgba(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                include_jpeg_preview,
+                &mut rgba_ptr,
+                &mut pw,
+                &mut ph,
+                &mut jpeg_ptr,
+                &mut jpeg_len,
+            )
+        };
+        if !ok || rgba_ptr.is_null() || pw == 0 || ph == 0 {
+            if !rgba_ptr.is_null() {
+                unsafe { lt_macos_free_bytes(rgba_ptr) };
+            }
+            if !jpeg_ptr.is_null() {
+                unsafe { lt_macos_free_bytes(jpeg_ptr) };
+            }
+            return None;
+        }
+
+        let byte_len = (pw as usize) * (ph as usize) * 4;
+        let rgba = unsafe { std::slice::from_raw_parts(rgba_ptr, byte_len) }.to_vec();
+        unsafe { lt_macos_free_bytes(rgba_ptr) };
+
+        let preview_jpeg = if !jpeg_ptr.is_null() && jpeg_len > 0 {
+            let j = unsafe { std::slice::from_raw_parts(jpeg_ptr, jpeg_len) }.to_vec();
+            unsafe { lt_macos_free_bytes(jpeg_ptr) };
+            Some(j)
+        } else {
+            if !jpeg_ptr.is_null() {
+                unsafe { lt_macos_free_bytes(jpeg_ptr) };
+            }
+            None
+        };
+
+        Some(CapturedImage {
+            rect,
+            pixel_width: pw,
+            pixel_height: ph,
+            rgba,
+            preview_jpeg,
+        })
+    }
+
+    fn ocr_captured_image(&self, image: &CapturedImage) -> Result<Vec<OcrLine>, ExtractionFailure> {
+        let expected = (image.pixel_width as usize) * (image.pixel_height as usize) * 4;
+        if image.pixel_width < 4 || image.pixel_height < 4 || image.rgba.len() < expected {
+            return Err(ExtractionFailure::NoText);
+        }
+
+        let raw = take_owned_string(unsafe {
+            lt_macos_ocr_rgba_json(
+                image.rgba.as_ptr(),
+                image.pixel_width,
+                image.pixel_height,
+                image.rect.x,
+                image.rect.y,
+                image.rect.width,
+                image.rect.height,
+            )
+        })
+        .ok_or(ExtractionFailure::NoText)?;
+
+        let resp: NativeOcrResponse =
+            serde_json::from_str(&raw).map_err(|_| ExtractionFailure::NoText)?;
+
+        if resp.status == "permissionDenied" {
+            return Err(ExtractionFailure::PermissionDenied);
+        }
+        if resp.lines.is_empty() {
+            return Err(ExtractionFailure::NoText);
+        }
+        Ok(resp.lines)
+    }
+
     fn permissions_status(&self, prompt_accessibility: bool) -> PermissionsStatus {
         unsafe {
             PermissionsStatus {
@@ -536,5 +754,256 @@ impl PlatformBackend for MacOsPlatform {
                 lt_macos_hide_popup_window(ns_win);
             }
         }
+    }
+
+    fn configure_overlay_window(&self, window: &tauri::WebviewWindow) {
+        if let Ok(ns_win) = window.ns_window() {
+            unsafe {
+                lt_macos_configure_overlay_window(ns_win);
+            }
+        }
+    }
+
+    fn present_overlay(&self, window: &tauri::WebviewWindow, rect: ScreenRect) {
+        if let Ok(ns_win) = window.ns_window() {
+            unsafe {
+                lt_macos_present_overlay_window(ns_win, rect.x, rect.y, rect.width, rect.height);
+            }
+        }
+    }
+
+    fn hide_overlay(&self, window: &tauri::WebviewWindow) {
+        if let Ok(ns_win) = window.ns_window() {
+            unsafe {
+                lt_macos_hide_overlay_window(ns_win);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_zero_length_or_clamped_ax_range_on_chrome_flags_heading() {
+        let input_pointer = ScreenPoint::new(412.0, 331.0);
+        let heading_rect = ScreenRect::new(180.0, 320.0, 260.0, 22.0);
+
+        // Repro 1: Chrome `chrome://flags` heading returns zero-length CFRange(0, 0) while cursor is on "Input"
+        let zero_len_resp = NativeHoverAxResponse {
+            status: "rangeResolved".into(),
+            role: Some("AXStaticText".into()),
+            window_text: Some("Prompt API Multimodal Input".into()),
+            window_start: Some(0),
+            element_total: Some(27),
+            hit_offset: Some(0),
+            hit_length: Some(0),
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: None,
+            word_rect: None,
+            char_rect: None,
+            elem_rect: Some(heading_rect),
+            rect: Some(heading_rect),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        assert_eq!(
+            resolve_hover_ax_response(zero_len_resp, input_pointer, false, 1),
+            Err(ExtractionFailure::PositionUnresolved)
+        );
+
+        // Repro 2: Control clamps RangeForPosition to offset 0 ("P" of "Prompt") far left of pointer
+        let clamped_resp = NativeHoverAxResponse {
+            status: "rangeResolved".into(),
+            role: Some("AXStaticText".into()),
+            window_text: Some("Prompt API Multimodal Input".into()),
+            window_start: Some(0),
+            element_total: Some(27),
+            hit_offset: Some(0),
+            hit_length: Some(1),
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: None,
+            word_rect: Some(ScreenRect::new(180.0, 320.0, 58.0, 20.0)),
+            char_rect: Some(ScreenRect::new(180.0, 320.0, 9.0, 20.0)),
+            elem_rect: Some(heading_rect),
+            rect: Some(ScreenRect::new(180.0, 320.0, 58.0, 20.0)),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        assert_eq!(
+            resolve_hover_ax_response(clamped_resp, input_pointer, false, 2),
+            Err(ExtractionFailure::PositionUnresolved)
+        );
+
+        // Repro 3: BoundsForRange unavailable, offset 0 reported while pointer is 232pt right of heading origin
+        let unverified_zero_offset = NativeHoverAxResponse {
+            status: "rangeResolved".into(),
+            role: Some("AXStaticText".into()),
+            window_text: Some("Prompt API Multimodal Input".into()),
+            window_start: Some(0),
+            element_total: Some(27),
+            hit_offset: Some(0),
+            hit_length: Some(1),
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: None,
+            word_rect: None,
+            char_rect: None,
+            elem_rect: Some(heading_rect),
+            rect: None,
+            app_id: Some("com.google.Chrome".into()),
+        };
+        assert_eq!(
+            resolve_hover_ax_response(unverified_zero_offset, input_pointer, false, 3),
+            Err(ExtractionFailure::PositionUnresolved)
+        );
+    }
+
+    #[test]
+    fn resolves_exact_hovered_word_and_never_uses_multiword_container_rect_as_word_anchor() {
+        let input_pointer = ScreenPoint::new(412.0, 331.0);
+        let input_word_rect = ScreenRect::new(392.0, 320.0, 42.0, 20.0);
+        let heading_rect = ScreenRect::new(180.0, 320.0, 260.0, 22.0);
+
+        // Offset 24 is 'p' inside "Prompt API Multimodal Input" ("Inp|ut")
+        let valid_resp = NativeHoverAxResponse {
+            status: "rangeResolved".into(),
+            role: Some("AXStaticText".into()),
+            window_text: Some("Prompt API Multimodal Input".into()),
+            window_start: Some(0),
+            element_total: Some(27),
+            hit_offset: Some(24),
+            hit_length: Some(1),
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: None,
+            word_rect: Some(input_word_rect),
+            char_rect: Some(ScreenRect::new(408.0, 320.0, 8.0, 20.0)),
+            elem_rect: Some(heading_rect),
+            rect: Some(input_word_rect),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        let snap = resolve_hover_ax_response(valid_resp, input_pointer, false, 7)
+            .expect("must resolve exact word Input");
+        assert_eq!(snap.text, "Input");
+        assert_eq!(snap.scope, ExtractionScope::Word);
+        assert_eq!(snap.anchor_rect, Some(input_word_rect));
+
+        // Even if wordRect/charRect are missing for a valid non-zero offset, multi-word elemRect is NOT used as word anchor
+        let no_sub_bounds = NativeHoverAxResponse {
+            status: "rangeResolved".into(),
+            role: Some("AXStaticText".into()),
+            window_text: Some("Prompt API Multimodal Input".into()),
+            window_start: Some(0),
+            element_total: Some(27),
+            hit_offset: Some(24),
+            hit_length: Some(1),
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: None,
+            word_rect: None,
+            char_rect: None,
+            elem_rect: Some(heading_rect),
+            rect: None,
+            app_id: Some("com.google.Chrome".into()),
+        };
+        let snap2 = resolve_hover_ax_response(no_sub_bounds, input_pointer, false, 8)
+            .expect("must resolve word without container anchor");
+        assert_eq!(snap2.text, "Input");
+        assert_eq!(snap2.anchor_rect, None);
+    }
+
+    #[test]
+    fn classifies_multiword_and_slug_labels_for_ocr_refinement_and_filters_distant_selection() {
+        let pt = ScreenPoint::new(412.0, 331.0);
+        let rect = ScreenRect::new(180.0, 320.0, 260.0, 22.0);
+
+        let multi = NativeHoverAxResponse {
+            status: "labelResolved".into(),
+            role: Some("AXStaticText".into()),
+            window_text: None,
+            window_start: None,
+            element_total: None,
+            hit_offset: None,
+            hit_length: None,
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: Some("Prompt API Multimodal Input".into()),
+            word_rect: None,
+            char_rect: None,
+            elem_rect: Some(rect),
+            rect: Some(rect),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        let multi_snap = resolve_hover_ax_response(multi, pt, false, 1).unwrap();
+        assert_eq!(multi_snap.scope, ExtractionScope::Label);
+
+        let slug = NativeHoverAxResponse {
+            status: "labelResolved".into(),
+            role: Some("AXLink".into()),
+            window_text: None,
+            window_start: None,
+            element_total: None,
+            hit_offset: None,
+            hit_length: None,
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: Some("#prompt-api-for-gemini-nano-multimodal-input".into()),
+            word_rect: None,
+            char_rect: None,
+            elem_rect: Some(rect),
+            rect: Some(rect),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        let slug_snap = resolve_hover_ax_response(slug, pt, false, 2).unwrap();
+        assert_eq!(slug_snap.scope, ExtractionScope::Label);
+
+        let single_btn = NativeHoverAxResponse {
+            status: "labelResolved".into(),
+            role: Some("AXButton".into()),
+            window_text: None,
+            window_start: None,
+            element_total: None,
+            hit_offset: None,
+            hit_length: None,
+            paragraph_text: None,
+            paragraph_hit_offset: None,
+            label: Some("Default".into()),
+            word_rect: None,
+            char_rect: None,
+            elem_rect: Some(ScreenRect::new(400.0, 320.0, 64.0, 24.0)),
+            rect: Some(ScreenRect::new(400.0, 320.0, 64.0, 24.0)),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        let single_snap = resolve_hover_ax_response(single_btn, pt, false, 3).unwrap();
+        assert_eq!(single_snap.scope, ExtractionScope::Word);
+
+        // Distant selection in Chrome search box must NOT hijack hover, while explicit selection trigger still reads it
+        let distant_sel = NativeSelectionResponse {
+            status: "ok".into(),
+            text: Some("Prompt".into()),
+            source: Some("accessibility".into()),
+            pointer_inside: Some(false),
+            rect: Some(ScreenRect::new(240.0, 110.0, 56.0, 20.0)),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        assert_eq!(resolve_selection_response(distant_sel, pt, 4, true), Ok(None));
+
+        let explicit_sel = NativeSelectionResponse {
+            status: "ok".into(),
+            text: Some("Prompt".into()),
+            source: Some("accessibility".into()),
+            pointer_inside: Some(false),
+            rect: Some(ScreenRect::new(240.0, 110.0, 56.0, 20.0)),
+            app_id: Some("com.google.Chrome".into()),
+        };
+        assert_eq!(
+            resolve_selection_response(explicit_sel, pt, 5, false)
+                .unwrap()
+                .unwrap()
+                .text,
+            "Prompt"
+        );
     }
 }

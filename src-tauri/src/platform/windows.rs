@@ -6,6 +6,7 @@ use crate::extraction::{
     is_allowed_input_text, ExtractionCompleteness, ExtractionFailure, ExtractionScope,
     ExtractionSnapshot, ExtractionSource, ScreenPoint, ScreenRect,
 };
+use crate::overlay::CapturedImage;
 use crate::platform::{
     InputEventCallback, PermissionsStatus, PlatformBackend, PlatformInputEvent, ShortcutSpec,
     SHORTCUT_MOD_ALT, SHORTCUT_MOD_CTRL, SHORTCUT_MOD_META, SHORTCUT_MOD_SHIFT,
@@ -603,12 +604,14 @@ fn capture_screen_bgra(px: i32, py: i32, pw: i32, ph: i32) -> Option<Vec<u8>> {
     }
 }
 
-fn run_windows_ocr(logical_region: ScreenRect) -> Result<Vec<OcrLine>, ExtractionFailure> {
-    let (px, py, pw, ph) = logical_to_physical_rect(logical_region);
-    let bgra = capture_screen_bgra(px, py, pw, ph).ok_or(ExtractionFailure::NoText)?;
-
-    let ibuffer = CryptographicBuffer::CreateFromByteArray(&bgra)
-        .map_err(|_| ExtractionFailure::NoText)?;
+fn run_windows_ocr_bgra(
+    bgra: &[u8],
+    pw: i32,
+    ph: i32,
+    logical_region: ScreenRect,
+) -> Result<Vec<OcrLine>, ExtractionFailure> {
+    let ibuffer =
+        CryptographicBuffer::CreateFromByteArray(bgra).map_err(|_| ExtractionFailure::NoText)?;
     let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
         &ibuffer,
         BitmapPixelFormat::Bgra8,
@@ -674,6 +677,12 @@ fn run_windows_ocr(logical_region: ScreenRect) -> Result<Vec<OcrLine>, Extractio
     }
 
     Ok(out_lines)
+}
+
+fn run_windows_ocr(logical_region: ScreenRect) -> Result<Vec<OcrLine>, ExtractionFailure> {
+    let (px, py, pw, ph) = logical_to_physical_rect(logical_region);
+    let bgra = capture_screen_bgra(px, py, pw, ph).ok_or(ExtractionFailure::NoText)?;
+    run_windows_ocr_bgra(&bgra, pw, ph, logical_region)
 }
 
 // ============================================================================
@@ -961,6 +970,8 @@ impl PlatformBackend for WindowsPlatform {
                         Some(sent) => (Some(sent.text), Some(sent.completeness)),
                         None => (None, None),
                     };
+                    let compact_elem_rect = uia_element_rect_logical(&elem)
+                        .filter(|r| r.width <= 160.0 && r.height <= 44.0);
                     return Ok(ExtractionSnapshot {
                         generation,
                         text: word,
@@ -969,7 +980,7 @@ impl PlatformBackend for WindowsPlatform {
                         scope: ExtractionScope::Word,
                         completeness: ExtractionCompleteness::Complete,
                         source: ExtractionSource::Accessibility,
-                        anchor_rect: word_rect.or_else(|| uia_element_rect_logical(&elem)),
+                        anchor_rect: word_rect.or(compact_elem_rect),
                         pointer,
                         app_id: self.app_id_at_point(pointer),
                     });
@@ -992,7 +1003,7 @@ impl PlatformBackend for WindowsPlatform {
             .unwrap_or_default();
 
         if !label.is_empty() && label.chars().count() <= 180 {
-            let scope = if label.split_whitespace().count() <= 1 {
+            let scope = if crate::extraction::resolver::is_single_word_label(&label) {
                 ExtractionScope::Word
             } else {
                 ExtractionScope::Label
@@ -1084,6 +1095,43 @@ impl PlatformBackend for WindowsPlatform {
             pointer: ScreenPoint::new(rect.mid_x(), rect.max_y()),
             app_id: None,
         })
+    }
+
+    fn capture_region_image(
+        &self,
+        rect: ScreenRect,
+        _include_jpeg_preview: bool,
+    ) -> Option<CapturedImage> {
+        let (px, py, pw, ph) = logical_to_physical_rect(rect);
+        let mut buf = capture_screen_bgra(px, py, pw, ph)?;
+        for px_chunk in buf.chunks_exact_mut(4) {
+            px_chunk.swap(0, 2); // BGRA -> RGBA
+            px_chunk[3] = 255;
+        }
+        Some(CapturedImage {
+            rect,
+            pixel_width: pw as u32,
+            pixel_height: ph as u32,
+            rgba: buf,
+            preview_jpeg: None,
+        })
+    }
+
+    fn ocr_captured_image(&self, image: &CapturedImage) -> Result<Vec<OcrLine>, ExtractionFailure> {
+        let expected = (image.pixel_width as usize) * (image.pixel_height as usize) * 4;
+        if image.pixel_width < 4 || image.pixel_height < 4 || image.rgba.len() < expected {
+            return Err(ExtractionFailure::NoText);
+        }
+        let mut bgra = image.rgba[..expected].to_vec();
+        for px_chunk in bgra.chunks_exact_mut(4) {
+            px_chunk.swap(0, 2); // RGBA -> BGRA
+        }
+        run_windows_ocr_bgra(
+            &bgra,
+            image.pixel_width as i32,
+            image.pixel_height as i32,
+            image.rect,
+        )
     }
 
     fn permissions_status(&self, _prompt_accessibility: bool) -> PermissionsStatus {

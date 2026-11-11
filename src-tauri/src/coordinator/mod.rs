@@ -286,7 +286,12 @@ impl CoordinatorStateMachine {
 
         // 2. Trigger IS held: enforce 8pt debounce radius & current word anchor rect
         if let Some(anchor_rect) = self.active_anchor_rect {
-            if anchor_rect.inset_by(-3.0, -3.0).contains(pointer) {
+            let plausible_anchor = if self.card.scope == ExtractionScope::Word {
+                anchor_rect.width <= 160.0 && anchor_rect.height <= 44.0
+            } else {
+                true
+            };
+            if plausible_anchor && anchor_rect.inset_by(-3.0, -3.0).contains(pointer) {
                 // Still hovering on the exact same word/sentence -> keep steady!
                 self.dwell_deadline = None;
                 return StateTransitionAction::None;
@@ -624,5 +629,44 @@ mod tests {
             sm.on_trigger_released(pt, true, t0 + Duration::from_millis(360), true, 2500);
         assert_eq!(tap_rel, StateTransitionAction::None);
         assert!(!sm.card.visible);
+    }
+
+    #[test]
+    fn oversized_word_anchor_rect_does_not_freeze_reextraction_when_sliding_cursor() {
+        let mut sm = CoordinatorStateMachine::new();
+        let t0 = Instant::now();
+        let prompt_pt = ScreenPoint::new(205.0, 331.0);
+        let input_pt = ScreenPoint::new(412.0, 331.0);
+
+        sm.on_trigger_pressed(prompt_pt, false, t0, 100);
+        let _ = sm.on_tick(t0 + Duration::from_millis(110), 2500);
+
+        // Simulate a container-wide anchor rect (260pt wide across "Prompt API Multimodal Input")
+        sm.present_card(
+            PopupCardViewState {
+                generation: 1,
+                original_text: "Prompt".into(),
+                scope: ExtractionScope::Word,
+                ..Default::default()
+            },
+            Some(ScreenRect::new(180.0, 320.0, 260.0, 22.0)),
+            ScreenRect::new(180.0, 350.0, 360.0, 140.0),
+            false,
+            t0 + Duration::from_millis(120),
+            2500,
+        );
+
+        // Sliding pointer onto "Input" while keeping Option held must NOT be swallowed by the wide container rect!
+        assert_eq!(
+            sm.on_pointer_moved(input_pt, t0 + Duration::from_millis(200), 100, 2500, 8.0),
+            StateTransitionAction::None
+        );
+        assert_eq!(
+            sm.on_tick(t0 + Duration::from_millis(305), 2500),
+            StateTransitionAction::StartHoverExtraction {
+                pointer: input_pt,
+                sentence_mode: false,
+            }
+        );
     }
 }

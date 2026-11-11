@@ -1,11 +1,12 @@
 use crate::translation::{FastMtEngine, LlmProviderKind, LlmRequestConfig};
-use chrono::{DateTime, TimeZone, Utc};
-use parking_lot::RwLock;
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const KEYRING_SERVICE: &str = "com.atat.lighttranslate.v2";
@@ -269,15 +270,129 @@ pub enum SaveOutcome {
     AlreadySaved,
 }
 
+// ============================================================================
+// Daily Usage Statistics & Heatmap Analytics (`UsageStats.json`)
+// ============================================================================
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DailyUsageRecord {
+    pub word_count: u64,
+    pub char_count: u64,
+    pub query_count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct UsageStatsFile {
+    pub daily: BTreeMap<String, DailyUsageRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeatmapDayCell {
+    pub date: String,
+    /// ISO weekday: 1 = Monday .. 7 = Sunday
+    pub weekday: u8,
+    pub word_count: u64,
+    pub char_count: u64,
+    pub query_count: u64,
+    /// Visual intensity bucket: 0 (none) ..= 4 (peak)
+    pub level: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageStatsSummary {
+    pub today_date: String,
+    pub today_words: u64,
+    pub today_chars: u64,
+    pub today_queries: u64,
+    pub total_words: u64,
+    pub total_chars: u64,
+    pub total_queries: u64,
+    pub active_days: u32,
+    pub current_streak: u32,
+    pub longest_streak: u32,
+    pub best_day_date: Option<String>,
+    pub best_day_words: u64,
+    pub this_week_words: u64,
+    pub last_week_words: u64,
+    /// 365 days ending at `today_date` (chronological order)
+    pub heatmap: Vec<HeatmapDayCell>,
+}
+
+fn is_cjk_unit_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3400..=0x4DBF   // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0x3040..=0x309F // Hiragana
+        | 0x30A0..=0x30FF // Katakana
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0x20000..=0x2A6DF // CJK Extension B
+    )
+}
+
+/// Counts mixed-language translation units (`word_count`, `char_count`):
+/// - English / Latin / numeric tokens count as 1 unit per word (`don't`, `v2.0`, `cross-platform` = 1 each).
+/// - CJK ideographs / Kana / Hangul count as 1 unit per character.
+/// - `char_count` is the total number of non-whitespace characters.
+pub fn count_translation_units(text: &str) -> (u64, u64) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return (0, 0);
+    }
+
+    let mut units = 0u64;
+    let mut non_ws_chars = 0u64;
+    let mut in_word = false;
+    let mut chars = trimmed.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            in_word = false;
+            continue;
+        }
+        non_ws_chars += 1;
+
+        if is_cjk_unit_char(c) {
+            in_word = false;
+            units += 1;
+        } else if c.is_alphanumeric() {
+            if !in_word {
+                units += 1;
+                in_word = true;
+            }
+        } else if in_word && matches!(c, '\'' | '’' | '-' | '.' | '_') {
+            // Keep internal connectors inside a word if followed immediately by an alphanumeric char
+            if !chars.peek().is_some_and(|next| next.is_alphanumeric() && !is_cjk_unit_char(*next)) {
+                in_word = false;
+            }
+        } else {
+            in_word = false;
+        }
+    }
+
+    (units, non_ws_chars)
+}
+
+const USAGE_DEDUP_WINDOW: Duration = Duration::from_secs(60);
+const USAGE_DEDUP_CAPACITY: usize = 64;
+
 pub struct AppStorage {
     dir: PathBuf,
     settings: RwLock<AppSettings>,
     entries: RwLock<Vec<SavedEntry>>,
+    usage: RwLock<BTreeMap<String, DailyUsageRecord>>,
+    recent_queries: Mutex<VecDeque<(String, Instant)>>,
 }
 
 impl AppStorage {
     pub const SETTINGS_FILE: &'static str = "Settings.json";
     pub const SAVED_ENTRIES_FILE: &'static str = "SavedEntries.json";
+    pub const USAGE_STATS_FILE: &'static str = "UsageStats.json";
 
     pub fn open_default() -> Self {
         let base = dirs::data_dir()
@@ -301,10 +416,19 @@ impl AppStorage {
             .and_then(|s| Self::parse_entries_flexible(&s).ok())
             .unwrap_or_default();
 
+        let usage_path = dir.join(Self::USAGE_STATS_FILE);
+        let usage = fs::read_to_string(&usage_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<UsageStatsFile>(&s).ok())
+            .map(|f| f.daily)
+            .unwrap_or_default();
+
         Self {
             dir,
             settings: RwLock::new(settings),
             entries: RwLock::new(entries),
+            usage: RwLock::new(usage),
+            recent_queries: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -432,6 +556,217 @@ impl AppStorage {
         }
         Ok(out)
     }
+
+    /// Records a translation query into local daily stats (`UsageStats.json`) with a 60s
+    /// duplicate suppression window so repeated accidental hovers on the same text don't inflate counts.
+    pub fn record_translation_usage(&self, source_text: &str) -> Option<UsageStatsSummary> {
+        let today = Local::now().date_naive();
+        self.record_translation_usage_on_date(source_text, today, Instant::now())
+    }
+
+    pub fn record_translation_usage_on_date(
+        &self,
+        source_text: &str,
+        local_date: NaiveDate,
+        now: Instant,
+    ) -> Option<UsageStatsSummary> {
+        let (units, chars) = count_translation_units(source_text);
+        if units == 0 && chars == 0 {
+            return None;
+        }
+
+        let norm_key = source_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+
+        {
+            let mut recent = self.recent_queries.lock();
+            recent.retain(|(_, ts)| now.saturating_duration_since(*ts) <= USAGE_DEDUP_WINDOW);
+            if recent.iter().any(|(prev, _)| prev == &norm_key) {
+                return None;
+            }
+            if recent.len() >= USAGE_DEDUP_CAPACITY {
+                recent.pop_front();
+            }
+            recent.push_back((norm_key, now));
+        }
+
+        let date_key = local_date.format("%Y-%m-%d").to_string();
+        {
+            let mut guard = self.usage.write();
+            let entry = guard.entry(date_key).or_default();
+            entry.word_count = entry.word_count.saturating_add(units.max(1));
+            entry.char_count = entry.char_count.saturating_add(chars);
+            entry.query_count = entry.query_count.saturating_add(1);
+
+            let file_payload = UsageStatsFile {
+                daily: guard.clone(),
+            };
+            if let Ok(bytes) = serde_json::to_vec_pretty(&file_payload) {
+                let _ = atomic_write(&self.dir.join(Self::USAGE_STATS_FILE), &bytes);
+            }
+        }
+
+        Some(self.usage_summary_for_date(local_date))
+    }
+
+    pub fn usage_summary(&self) -> UsageStatsSummary {
+        self.usage_summary_for_date(Local::now().date_naive())
+    }
+
+    pub fn usage_summary_for_date(&self, today: NaiveDate) -> UsageStatsSummary {
+        let guard = self.usage.read();
+        let today_str = today.format("%Y-%m-%d").to_string();
+        let today_rec = guard.get(&today_str).cloned().unwrap_or_default();
+
+        let mut total_words = 0u64;
+        let mut total_chars = 0u64;
+        let mut total_queries = 0u64;
+        let mut active_days = 0u32;
+        let mut best_day_words = 0u64;
+        let mut best_day_date: Option<String> = None;
+
+        // Parse active dates in chronological order for longest streak calculation
+        let mut active_dates: Vec<NaiveDate> = Vec::new();
+        for (date_str, rec) in guard.iter() {
+            total_words = total_words.saturating_add(rec.word_count);
+            total_chars = total_chars.saturating_add(rec.char_count);
+            total_queries = total_queries.saturating_add(rec.query_count);
+
+            if rec.word_count > 0 || rec.query_count > 0 {
+                active_days += 1;
+                if rec.word_count >= best_day_words && rec.word_count > 0 {
+                    best_day_words = rec.word_count;
+                    best_day_date = Some(date_str.clone());
+                }
+                if let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    active_dates.push(d);
+                }
+            }
+        }
+        active_dates.sort_unstable();
+
+        // Longest streak across all recorded history
+        let mut longest_streak = 0u32;
+        let mut run_streak = 0u32;
+        let mut prev_date: Option<NaiveDate> = None;
+        for d in &active_dates {
+            if let Some(prev) = prev_date {
+                if *d == prev + ChronoDuration::days(1) {
+                    run_streak += 1;
+                } else if *d != prev {
+                    run_streak = 1;
+                }
+            } else {
+                run_streak = 1;
+            }
+            longest_streak = longest_streak.max(run_streak);
+            prev_date = Some(*d);
+        }
+
+        // Current streak: starts at `today` if active today, else starts at `yesterday` if active yesterday
+        // so opening the app in the morning doesn't show "0 day streak" before the first query!
+        let has_activity = |d: NaiveDate| -> bool {
+            let key = d.format("%Y-%m-%d").to_string();
+            guard
+                .get(&key)
+                .is_some_and(|r| r.word_count > 0 || r.query_count > 0)
+        };
+        let mut current_streak = 0u32;
+        let mut cursor = if has_activity(today) {
+            Some(today)
+        } else {
+            let yesterday = today - ChronoDuration::days(1);
+            has_activity(yesterday).then_some(yesterday)
+        };
+        while let Some(d) = cursor {
+            if has_activity(d) {
+                current_streak += 1;
+                cursor = Some(d - ChronoDuration::days(1));
+            } else {
+                break;
+            }
+        }
+
+        // Rolling 7-day comparison (this 7 days vs prior 7 days)
+        let mut this_week_words = 0u64;
+        let mut last_week_words = 0u64;
+        for offset in 0..7 {
+            let d1 = (today - ChronoDuration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string();
+            if let Some(r) = guard.get(&d1) {
+                this_week_words = this_week_words.saturating_add(r.word_count);
+            }
+            let d2 = (today - ChronoDuration::days(offset + 7))
+                .format("%Y-%m-%d")
+                .to_string();
+            if let Some(r) = guard.get(&d2) {
+                last_week_words = last_week_words.saturating_add(r.word_count);
+            }
+        }
+
+        // Adaptive 4-tier heatmap bucket thresholds anchored by peak daily volume (floor 360 words)
+        let mut window_peak = 0u64;
+        for offset in 0..365 {
+            let d = (today - ChronoDuration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string();
+            if let Some(r) = guard.get(&d) {
+                window_peak = window_peak.max(r.word_count);
+            }
+        }
+        let scale_ref = window_peak.max(360);
+        let t1 = (scale_ref / 12).max(15);
+        let t2 = (scale_ref / 4).max(60);
+        let t3 = (scale_ref * 6 / 10).max(180);
+
+        let mut heatmap = Vec::with_capacity(365);
+        for back in (0..365).rev() {
+            let d = today - ChronoDuration::days(back);
+            let date_str = d.format("%Y-%m-%d").to_string();
+            let rec = guard.get(&date_str).cloned().unwrap_or_default();
+            let level = if rec.word_count == 0 && rec.query_count == 0 {
+                0
+            } else if rec.word_count <= t1 {
+                1
+            } else if rec.word_count <= t2 {
+                2
+            } else if rec.word_count <= t3 {
+                3
+            } else {
+                4
+            };
+            heatmap.push(HeatmapDayCell {
+                date: date_str,
+                weekday: d.weekday().number_from_monday() as u8,
+                word_count: rec.word_count,
+                char_count: rec.char_count,
+                query_count: rec.query_count,
+                level,
+            });
+        }
+
+        UsageStatsSummary {
+            today_date: today_str,
+            today_words: today_rec.word_count,
+            today_chars: today_rec.char_count,
+            today_queries: today_rec.query_count,
+            total_words,
+            total_chars,
+            total_queries,
+            active_days,
+            current_streak,
+            longest_streak,
+            best_day_date,
+            best_day_words,
+            this_week_words,
+            last_week_words,
+            heatmap,
+        }
+    }
 }
 
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -449,6 +784,69 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_unit_counter_handles_english_cjk_hyphens_and_numbers() {
+        assert_eq!(count_translation_units("   "), (0, 0));
+        assert_eq!(count_translation_units("Hello, world!"), (2, 12));
+        // Contractions, hyphens, and decimals stay unified as single words
+        assert_eq!(
+            count_translation_units("Don't break well-known v2.0 tokens."),
+            (5, 31)
+        );
+        // Mixed CJK + English: 4 Chinese chars + "AI" (1) + 2 Chinese chars = 7 units
+        assert_eq!(count_translation_units("实时流式 AI 翻译"), (7, 8));
+    }
+
+    #[test]
+    fn usage_stats_deduplicates_within_window_and_tracks_streaks() {
+        let temp_dir = std::env::temp_dir().join(format!("lt_v2_stats_{}", Uuid::new_v4()));
+        let store = AppStorage::open_in(temp_dir.clone());
+
+        let t0 = Instant::now();
+        let d1 = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+
+        assert!(store
+            .record_translation_usage_on_date("ephemeral architecture", d1, t0)
+            .is_some());
+        // Duplicate within 60s is ignored
+        assert!(store
+            .record_translation_usage_on_date("  Ephemeral   Architecture ", d1, t0 + Duration::from_secs(15))
+            .is_none());
+        // Same text after >60s is counted again
+        assert!(store
+            .record_translation_usage_on_date("ephemeral architecture", d2, t0 + Duration::from_secs(65))
+            .is_some());
+
+        // Morning of d3 BEFORE any query today: yesterday's 2-day streak is still preserved!
+        let morning_summary = store.usage_summary_for_date(d3);
+        assert_eq!(morning_summary.today_words, 0);
+        assert_eq!(morning_summary.current_streak, 2);
+        assert_eq!(morning_summary.longest_streak, 2);
+        assert_eq!(morning_summary.total_words, 4);
+
+        // Query on d3 extends streak to 3!
+        let after_d3 = store
+            .record_translation_usage_on_date("Cross-platform Liquid Glass overlay", d3, t0 + Duration::from_secs(130))
+            .unwrap();
+        assert_eq!(after_d3.today_words, 4);
+        assert_eq!(after_d3.current_streak, 3);
+        assert_eq!(after_d3.longest_streak, 3);
+        assert_eq!(after_d3.active_days, 3);
+        assert_eq!(after_d3.heatmap.len(), 365);
+        assert_eq!(after_d3.heatmap.last().unwrap().date, "2026-11-10");
+        assert!(after_d3.heatmap.last().unwrap().level >= 1);
+
+        // Reload from disk and verify UsageStats.json persisted atomically
+        let reopened = AppStorage::open_in(temp_dir.clone());
+        let reloaded = reopened.usage_summary_for_date(d3);
+        assert_eq!(reloaded.total_words, 8);
+        assert_eq!(reloaded.current_streak, 3);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn atomic_settings_and_legacy_swift_saved_entries_import() {

@@ -119,3 +119,65 @@ export interface ManualStreamEvent {
   ttftMs: number | null;
   error: string | null;
 }
+
+export interface HeatmapDayCell {
+  date: string;
+  weekday: number;
+  wordCount: number;
+  charCount: number;
+  queryCount: number;
+  level: number;
+}
+
+export interface UsageStatsSummary {
+  todayDate: string;
+  todayWords: number;
+  todayChars: number;
+  todayQueries: number;
+  totalWords: number;
+  totalChars: number;
+  totalQueries: number;
+  activeDays: number;
+  currentStreak: number;
+  longestStreak: number;
+  bestDayDate: string | null;
+  bestDayWords: number;
+  thisWeekWords: number;
+  lastWeekWords: number;
+  heatmap: HeatmapDayCell[];
+}
+
+export interface CaptureActivatePayload {
+  monitor: ScreenRect;
+  hasBackdrop: boolean;
+}
+
+export type OverlayToolbarPlacement = "above" | "below" | "insideTop";
+
+export interface OverlayBlockViewState {
+  id: number;
+  sourceText: string;
+  translation: string;
+  isLoading: boolean;
+  rect: ScreenRect;
+  lineRects: ScreenRect[];
+  lineCount: number;
+  estimatedFontPx: number;
+  bgColor: string;
+  textColor: string;
+  isDarkBg: boolean;
+}
+
+export interface CaptureOverlayViewState {
+  visible: boolean;
+  generation: number;
+  pinned: boolean;
+  isRefining: boolean;
+  error: string | null;
+  imageOffsetX: number;
+  imageOffsetY: number;
+  imageWidth: number;
+  imageHeight: number;
+  toolbarPlacement: OverlayToolbarPlacement;
+  blocks: OverlayBlockViewState[];
+}

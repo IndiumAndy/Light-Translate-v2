@@ -5,7 +5,9 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+use crate::extraction::resolver::OcrLine;
 use crate::extraction::{ExtractionFailure, ExtractionSnapshot, ScreenPoint, ScreenRect};
+use crate::overlay::CapturedImage;
 use crate::storage::TriggerModifier;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -294,6 +296,25 @@ pub trait PlatformBackend: Send + Sync {
         allow_clipboard_fallback: bool,
     ) -> Result<Option<ExtractionSnapshot>, ExtractionFailure>;
 
+    /// Read active user selection ONLY if `pointer` is resting on the selected text itself
+    /// (used during modifier-hover so distant selections in search bars or other lines never hijack hover).
+    fn extract_hovered_selection(
+        &self,
+        pointer: ScreenPoint,
+        generation: u64,
+    ) -> Result<Option<ExtractionSnapshot>, ExtractionFailure> {
+        match self.extract_selection(pointer, generation, false)? {
+            Some(snap)
+                if snap
+                    .anchor_rect
+                    .is_some_and(|r| r.is_valid() && r.inset_by(-6.0, -6.0).contains(pointer)) =>
+            {
+                Ok(Some(snap))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Read hovered word (plus sentence context) or full sentence via native Accessibility / UIAutomation.
     fn extract_hover_accessibility(
         &self,
@@ -317,6 +338,24 @@ pub trait PlatformBackend: Send + Sync {
         generation: u64,
     ) -> Result<ExtractionSnapshot, ExtractionFailure>;
 
+    /// Capture raw RGBA8 pixels (and optional fast JPEG preview) for `rect` in logical coordinates,
+    /// excluding Light Translate's own windows where supported.
+    fn capture_region_image(
+        &self,
+        rect: ScreenRect,
+        include_jpeg_preview: bool,
+    ) -> Option<CapturedImage> {
+        let _ = (rect, include_jpeg_preview);
+        None
+    }
+
+    /// Run local offline OCR directly on an already-captured `CapturedImage` so OCR bounding boxes,
+    /// background color samples, and cropped overlay graphics share 1:1 pixel alignment.
+    fn ocr_captured_image(&self, image: &CapturedImage) -> Result<Vec<OcrLine>, ExtractionFailure> {
+        let _ = image;
+        Err(ExtractionFailure::NotSupported)
+    }
+
     /// Check (and optionally prompt for) OS Accessibility / Screen Recording permissions.
     fn permissions_status(&self, prompt_accessibility: bool) -> PermissionsStatus;
 
@@ -339,6 +378,21 @@ pub trait PlatformBackend: Send + Sync {
 
     /// Hide `popup` immediately without activating any window.
     fn hide_popup(&self, window: &tauri::WebviewWindow);
+
+    /// Configure the dedicated in-place screenshot translation `overlay` window.
+    fn configure_overlay_window(&self, window: &tauri::WebviewWindow) {
+        self.configure_popup_window(window);
+    }
+
+    /// Position and show `overlay` interactively without stealing focus from the target app.
+    fn present_overlay(&self, window: &tauri::WebviewWindow, rect: ScreenRect) {
+        self.present_popup(window, rect, true);
+    }
+
+    /// Hide `overlay` immediately.
+    fn hide_overlay(&self, window: &tauri::WebviewWindow) {
+        self.hide_popup(window);
+    }
 }
 
 pub fn create_platform_backend() -> Arc<dyn PlatformBackend> {
