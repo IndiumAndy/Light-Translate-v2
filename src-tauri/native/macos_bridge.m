@@ -1938,6 +1938,17 @@ static const CGFloat kLTPopupCornerRadius = 16.0;
 @property (nullable, nonatomic, copy) NSColor *tintColor;
 @end
 
+// Rust links this object with -nodefaultlibs, so clang's
+// ___isPlatformVersionAtLeast (emitted by @available) is undefined.
+// Compare NSProcessInfo instead; the body only uses NSClassFromString.
+static BOOL lt_macos_version_at_least(NSInteger major, NSInteger minor) {
+    NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
+    if (version.majorVersion != major) {
+        return version.majorVersion > major;
+    }
+    return version.minorVersion >= minor;
+}
+
 static void lt_attach_native_glass_if_needed(NSWindow *win) {
     if (!win) return;
     NSView *rootView = [win contentView];
@@ -1967,7 +1978,7 @@ static void lt_attach_native_glass_if_needed(NSWindow *win) {
     }
 
     NSView *glassBackdrop = nil;
-    if (@available(macOS 26.0, *)) {
+    if (lt_macos_version_at_least(26, 0)) {
         Class glassCls = NSClassFromString(@"NSGlassEffectView");
         if (glassCls) {
             NSView<LTNativeGlassEffectViewProtocol> *glass =

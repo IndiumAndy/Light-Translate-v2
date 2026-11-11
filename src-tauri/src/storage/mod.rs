@@ -1,4 +1,4 @@
-use crate::translation::{FastMtEngine, LlmProviderKind, LlmRequestConfig};
+use crate::translation::{LlmProviderKind, LlmRequestConfig};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,6 @@ pub struct AppSettings {
     pub enable_ocr_fallback: bool,
     pub enable_clipboard_fallback: bool,
     pub enable_fast_mt: bool,
-    pub fast_mt_engine: FastMtEngine,
     pub word_fast_only: bool,
     pub enable_llm_translation: bool,
     pub active_provider: LlmProviderKind,
@@ -78,7 +77,6 @@ impl Default for AppSettings {
             enable_ocr_fallback: true,
             enable_clipboard_fallback: false,
             enable_fast_mt: true,
-            fast_mt_engine: FastMtEngine::GoogleFree,
             word_fast_only: false,
             enable_llm_translation: true,
             active_provider: LlmProviderKind::Gemini,
@@ -864,6 +862,15 @@ mod tests {
         let legacy_settings: AppSettings =
             serde_json::from_str(r#"{"lingerDismissMs":2500,"hoverDwellMs":150}"#).unwrap();
         assert!(legacy_settings.dismiss_on_trigger_release);
+
+        // `fastMtEngine` (including the removed "microsoftEdge" option) must not
+        // reject a settings file written by an older build.
+        let with_removed_engine: AppSettings = serde_json::from_str(
+            r#"{"fastMtEngine":"microsoftEdge","hoverDwellMs":180,"enableFastMt":true}"#,
+        )
+        .expect("legacy fastMtEngine is ignored");
+        assert!(with_removed_engine.enable_fast_mt);
+        assert_eq!(with_removed_engine.hover_dwell_ms, 180);
 
         let reopened = AppStorage::open_in(temp_dir.clone());
         assert_eq!(reopened.settings().hover_dwell_ms, 180);

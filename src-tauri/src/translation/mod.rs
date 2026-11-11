@@ -44,13 +44,6 @@ impl LlmProviderKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum FastMtEngine {
-    GoogleFree,
-    MicrosoftEdge,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum QueryMode {
     Word,
     Sentence,
@@ -548,10 +541,14 @@ pub async fn test_llm_connection(cfg: &LlmRequestConfig) -> ConnectionTestResult
 // Fast Non-Reasoning Machine Translation Channel (80 ~ 250ms)
 // ============================================================================
 
+/// Keyless fast translation through Google's unofficial `client=gtx` endpoint.
+///
+/// There is no separate engine setting. A previous "Microsoft Edge" option did
+/// not call another service; saved settings that still contain `fastMtEngine`
+/// are ignored when `AppSettings` is loaded.
 pub async fn translate_fast_machine(
     text: &str,
     target_lang: &str,
-    _engine: FastMtEngine,
 ) -> Result<String, TranslationError> {
     let clean = text.trim();
     if clean.is_empty() {

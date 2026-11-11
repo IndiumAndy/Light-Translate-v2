@@ -56,7 +56,6 @@ export interface PopupCardViewState {
 
 export type TriggerModifier = "altOrOption" | "leftOption" | "rightOption" | "control";
 export type LlmProviderKind = "gemini" | "deepseek" | "openaiCompatible";
-export type FastMtEngine = "googleFree" | "microsoftEdge";
 export type QueryMode = "word" | "sentence" | "selection" | "explanation";
 
 export interface ProviderEndpointSettings {
@@ -77,7 +76,6 @@ export interface AppSettings {
   enableOcrFallback: boolean;
   enableClipboardFallback: boolean;
   enableFastMt: boolean;
-  fastMtEngine: FastMtEngine;
   wordFastOnly: boolean;
   enableLlmTranslation: boolean;
   activeProvider: LlmProviderKind;

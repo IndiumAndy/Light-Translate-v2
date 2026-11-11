@@ -1,3 +1,10 @@
-[build]
-# Redirect target artifacts outside Desktop to avoid iCloud Drive sync and macOS FinderInfo code-signing pollution.
-target-dir = "/Users/atat/Library/Caches/LightTranslateV2/target"
+# Keep this file portable. Do not set `build.target-dir` to a machine-specific
+# path. CI runners and other machines do not have that directory, and
+# `cargo test` fails immediately.
+#
+# The default artifact directory is `src-tauri/target` (gitignored).
+#
+# On a Mac where this repo lives in an iCloud-synced folder, export
+# CARGO_TARGET_DIR to keep objects in a local cache. See README
+# "本地开发与构建". Cargo reads that variable and it overrides any
+# target-dir set here, so the override stays out of the repository.

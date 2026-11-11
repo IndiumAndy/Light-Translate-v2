@@ -519,7 +519,7 @@ impl PlatformBackend for MacOsPlatform {
         generation: u64,
     ) -> Result<ExtractionSnapshot, ExtractionFailure> {
         let raw = take_owned_string(unsafe {
-            lt_macos_ocr_at_point_json(pointer.x, pointer.y, true)
+            lt_macos_ocr_at_point_json(pointer.x, pointer.y, sentence_mode)
         })
         .ok_or(ExtractionFailure::NoText)?;
 
