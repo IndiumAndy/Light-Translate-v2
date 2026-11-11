@@ -225,7 +225,7 @@ impl PlatformBackend for LinuxPlatform {
     }
 
     fn write_clipboard(&self, _text: &str) -> Result<(), String> {
-        Ok(())
+        Err("NotSupported: Linux 暂不支持写入系统剪贴板".into())
     }
 
     fn configure_popup_window(&self, _window: &tauri::WebviewWindow) {}
@@ -245,5 +245,22 @@ impl PlatformBackend for LinuxPlatform {
 
     fn hide_popup(&self, window: &tauri::WebviewWindow) {
         let _ = window.hide();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_clipboard_reports_not_supported() {
+        let platform = LinuxPlatform::new();
+        let err = platform
+            .write_clipboard("hello")
+            .expect_err("clipboard write must not report success");
+        assert!(
+            err.contains("NotSupported"),
+            "expected NotSupported, got {err}"
+        );
     }
 }
