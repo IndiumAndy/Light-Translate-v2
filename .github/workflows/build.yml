@@ -39,26 +39,30 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
   build-bundles:
+    name: Build (${{ matrix.os_label }})
     needs: test-core
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            os_label: macos
+            tauri_args: "--target universal-apple-darwin --bundles dmg"
           - platform: windows-latest
-            args: ""
+            os_label: windows
+            tauri_args: "--bundles nsis,msi"
           - platform: ubuntu-22.04
-            args: ""
+            os_label: linux
+            tauri_args: "--bundles deb,rpm,appimage"
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.os_label == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev file
 
       - uses: pnpm/action-setup@v4
         with:
@@ -72,7 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.90.0
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.os_label == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -81,14 +85,103 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile || pnpm install
 
-      - name: Build Tauri Desktop Bundles (.dmg / .msi / .exe / .deb / .AppImage)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Tauri platform bundles
+        run: pnpm tauri build ${{ matrix.tauri_args }}
+
+      - name: Normalize macOS installer filename
+        if: matrix.os_label == 'macos'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          DMG_FILE=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -maxdepth 1 -name "*.dmg" | head -n 1)
+          test -n "$DMG_FILE"
+          cp "$DMG_FILE" release-assets/LightTranslate-macOS-Universal.dmg
+          ls -lh release-assets
+
+      - name: Normalize Windows installer filenames
+        if: matrix.os_label == 'windows'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          EXE_FILE=$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -name "*-setup.exe" | head -n 1)
+          MSI_FILE=$(find src-tauri/target/release/bundle/msi -maxdepth 1 -name "*.msi" | head -n 1)
+          test -n "$EXE_FILE"
+          test -n "$MSI_FILE"
+          cp "$EXE_FILE" release-assets/LightTranslate-Windows-x64-setup.exe
+          cp "$MSI_FILE" release-assets/LightTranslate-Windows-x64.msi
+          ls -lh release-assets
+
+      - name: Normalize Linux package filenames
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          DEB_FILE=$(find src-tauri/target/release/bundle/deb -maxdepth 1 -name "*.deb" | head -n 1)
+          APPIMAGE_FILE=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name "*.AppImage" | head -n 1)
+          RPM_FILE=$(find src-tauri/target/release/bundle/rpm -maxdepth 1 -name "*.rpm" | head -n 1)
+          test -n "$DEB_FILE"
+          test -n "$APPIMAGE_FILE"
+          test -n "$RPM_FILE"
+          cp "$DEB_FILE" release-assets/LightTranslate-Linux-x86_64.deb
+          cp "$APPIMAGE_FILE" release-assets/LightTranslate-Linux-x86_64.AppImage
+          cp "$RPM_FILE" release-assets/LightTranslate-Linux-x86_64.rpm
+          ls -lh release-assets
+
+      - name: Upload OS-labeled release assets
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: "Light Translate v__VERSION__"
-          releaseBody: "Cross-platform release for macOS, Windows, and Linux."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          name: release-${{ matrix.os_label }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Cross-Platform GitHub Release
+    needs: build-bundles
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all OS release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: collected-assets
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAG="v${VERSION}"
+          cd collected-assets
+          sha256sum LightTranslate-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          cat <<EOF > release-notes.md
+          ## Light Translate ${TAG} — 跨平台安装包下载
+
+          请根据你当前使用的操作系统选择对应前缀的安装包（文件名已按 \`macOS\` / \`Windows\` / \`Linux\` 严格区分）：
+
+          | 操作系统 | 适用架构 / 发行版 | 推荐下载文件 |
+          | :--- | :--- | :--- |
+          | **macOS 14.0+** | Apple Silicon (M1–M4) & Intel 通用 | \`LightTranslate-macOS-Universal.dmg\` |
+          | **Windows 10 / 11** | 64 位个人桌面安装向导（推荐） | \`LightTranslate-Windows-x64-setup.exe\` |
+          | **Windows 10 / 11** | 64 位企业 / 静默部署包 | \`LightTranslate-Windows-x64.msi\` |
+          | **Linux (X11)** | Ubuntu / Debian / Mint (x86_64) | \`LightTranslate-Linux-x86_64.deb\` |
+          | **Linux (X11)** | 免安装单文件通用版 (x86_64) | \`LightTranslate-Linux-x86_64.AppImage\` |
+          | **Linux (X11)** | Fedora / RHEL / openSUSE (x86_64) | \`LightTranslate-Linux-x86_64.rpm\` |
+
+          > 校验值请参考附件中的 \`SHA256SUMS.txt\`。各平台详细安装说明见仓库 [README.md](https://github.com/${{ github.repository }}#下载与安装macos--windows--linux)。
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" LightTranslate-* SHA256SUMS.txt --clobber
+            gh release edit "$TAG" --title "Light Translate ${TAG}" --notes-file release-notes.md --draft=false --latest
+          else
+            gh release create "$TAG" LightTranslate-* SHA256SUMS.txt \
+              --target "${{ github.sha }}" \
+              --title "Light Translate ${TAG}" \
+              --notes-file release-notes.md \
+              --latest
+          fi

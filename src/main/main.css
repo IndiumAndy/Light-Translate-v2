@@ -1,0 +1,145 @@
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "./theme/built/editorial.css";
+@import "@astryxdesign/core/tailwind-theme.css";
+@import "tailwindcss/utilities.css" layer(utilities);
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: var(
+    --font-family-body,
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "PingFang SC",
+    system-ui,
+    sans-serif
+  );
+  background-color: var(--color-background-body);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Native macOS New York variable serif for lexicon headwords */
+.lt-serif {
+  font-family: ui-serif, "New York", "Iowan Old Style", Georgia, "Songti SC", serif;
+  letter-spacing: -0.012em;
+}
+
+/* B1 Crisp Cotton + Prussian Ink 5-step cadence ramp */
+.lt-heat-0 {
+  background-color: #ecebe7;
+  box-shadow: inset 0 0 0 1px rgba(21, 24, 30, 0.035);
+}
+.lt-heat-1 {
+  background-color: #cce0f5;
+}
+.lt-heat-2 {
+  background-color: #91bbe8;
+}
+.lt-heat-3 {
+  background-color: #4b83c4;
+}
+.lt-heat-4 {
+  background-color: #1f508a;
+}
+
+@media (prefers-color-scheme: dark) {
+  .lt-heat-0 {
+    background-color: #282b30;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+  }
+  .lt-heat-1 {
+    background-color: #21374f;
+  }
+  .lt-heat-2 {
+    background-color: #2f557d;
+  }
+  .lt-heat-3 {
+    background-color: #4b80b8;
+  }
+  .lt-heat-4 {
+    background-color: #7eb0e2;
+  }
+}
+
+html[data-theme="dark"] .lt-heat-0 {
+  background-color: #282b30;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+html[data-theme="dark"] .lt-heat-1 {
+  background-color: #21374f;
+}
+html[data-theme="dark"] .lt-heat-2 {
+  background-color: #2f557d;
+}
+html[data-theme="dark"] .lt-heat-3 {
+  background-color: #4b80b8;
+}
+html[data-theme="dark"] .lt-heat-4 {
+  background-color: #7eb0e2;
+}
+
+html[data-theme="light"] .lt-heat-0 {
+  background-color: #ecebe7;
+  box-shadow: inset 0 0 0 1px rgba(21, 24, 30, 0.035);
+}
+html[data-theme="light"] .lt-heat-1 {
+  background-color: #cce0f5;
+}
+html[data-theme="light"] .lt-heat-2 {
+  background-color: #91bbe8;
+}
+html[data-theme="light"] .lt-heat-3 {
+  background-color: #4b83c4;
+}
+html[data-theme="light"] .lt-heat-4 {
+  background-color: #1f508a;
+}
+
+@media (prefers-contrast: more) {
+  .lt-heat-0,
+  .lt-heat-1,
+  .lt-heat-2,
+  .lt-heat-3,
+  .lt-heat-4 {
+    box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.42);
+  }
+}
+
+/* Subtle native-feeling scrollbars for desktop panels */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 125, 136, 0.24) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 125, 136, 0.24);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 125, 136, 0.42);
+}
