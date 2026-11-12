@@ -26,34 +26,34 @@ export const editorialTheme = defineTheme({
 
   motion: { fast: 120, medium: 240, slow: 480, ratio: 0.75 },
 
-  // B1 · Crisp Cotton & Prussian Ink (清透棉白 + 现代钢笔藏青)
+  // B2 · Modern Porcelain & Academy Ink (温润瓷白 + 清澈学院蓝墨)
   tokens: {
-    "--color-background-body": ["#F3F2EF", "#141517"],
-    "--color-background-surface": ["#FCFCFA", "#1B1D20"],
-    "--color-background-card": ["#FFFFFF", "#22252A"],
+    "--color-background-body": ["#F2F2F1", "#141518"],
+    "--color-background-surface": ["#FDFDFC", "#1B1D21"],
+    "--color-background-card": ["#FFFFFF", "#22252B"],
     "--color-background-popover": ["#FFFFFF", "#252930"],
-    "--color-background-muted": ["#ECEBE7", "#252930"],
+    "--color-background-muted": ["#F5F5F4", "#252930"],
 
-    "--color-neutral": ["rgba(21, 24, 30, 0.06)", "rgba(255, 255, 255, 0.08)"],
-    "--color-overlay-hover": ["rgba(21, 24, 30, 0.045)", "rgba(255, 255, 255, 0.055)"],
-    "--color-overlay-pressed": ["rgba(21, 24, 30, 0.085)", "rgba(255, 255, 255, 0.095)"],
+    "--color-neutral": ["rgba(20, 23, 31, 0.055)", "rgba(255, 255, 255, 0.08)"],
+    "--color-overlay-hover": ["rgba(20, 23, 31, 0.04)", "rgba(255, 255, 255, 0.055)"],
+    "--color-overlay-pressed": ["rgba(20, 23, 31, 0.08)", "rgba(255, 255, 255, 0.095)"],
 
-    "--color-text-primary": ["#15181E", "#ECEEF2"],
-    "--color-text-secondary": ["#616670", "#989EA8"],
-    "--color-text-disabled": ["#989DA6", "#5C626E"],
+    "--color-text-primary": ["#14171F", "#ECEEF2"],
+    "--color-text-secondary": ["#5E6470", "#989EA8"],
+    "--color-text-disabled": ["#969CA8", "#5C626E"],
 
-    "--color-accent": ["#1F508A", "#78A9DC"],
+    "--color-accent": ["#1E5494", "#7AABE0"],
     "--color-on-accent": ["#FFFFFF", "#0C1522"],
-    "--color-accent-muted": ["#E6EFFA", "#1F3147"],
-    "--color-text-accent": ["#1B467A", "#8BB8E8"],
+    "--color-accent-muted": ["#E5F0FC", "#1E3148"],
+    "--color-text-accent": ["#194880", "#8BB8E8"],
 
-    "--color-icon-accent": ["#1F508A", "#8BB8E8"],
-    "--color-icon-primary": ["#181C23", "#ECEEF2"],
-    "--color-icon-secondary": ["#646A75", "#949BA6"],
-    "--color-icon-disabled": ["#9DA2AC", "#585E6A"],
+    "--color-icon-accent": ["#1E5494", "#8BB8E8"],
+    "--color-icon-primary": ["#171B24", "#ECEEF2"],
+    "--color-icon-secondary": ["#616775", "#949BA6"],
+    "--color-icon-disabled": ["#9AA0AD", "#585E6A"],
 
-    "--color-border": ["#E5E4DF", "rgba(255, 255, 255, 0.085)"],
-    "--color-border-emphasized": ["#D2D1CB", "#383D47"],
+    "--color-border": ["#E4E5E7", "rgba(255, 255, 255, 0.085)"],
+    "--color-border-emphasized": ["#CFD2D8", "#383D47"],
 
     "--radius-none": "0px",
     "--radius-inner": "0.375rem",

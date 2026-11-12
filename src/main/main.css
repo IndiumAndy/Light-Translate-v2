@@ -39,75 +39,75 @@ body {
   letter-spacing: -0.012em;
 }
 
-/* B1 Crisp Cotton + Prussian Ink 5-step cadence ramp */
+/* B2 Modern Porcelain + Academy Ink 5-step cadence ramp */
 .lt-heat-0 {
-  background-color: #ecebe7;
-  box-shadow: inset 0 0 0 1px rgba(21, 24, 30, 0.035);
+  background-color: #ebeced;
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.035);
 }
 .lt-heat-1 {
-  background-color: #cce0f5;
+  background-color: #cbe0f7;
 }
 .lt-heat-2 {
-  background-color: #91bbe8;
+  background-color: #8fbbef;
 }
 .lt-heat-3 {
-  background-color: #4b83c4;
+  background-color: #4985cc;
 }
 .lt-heat-4 {
-  background-color: #1f508a;
+  background-color: #1e5494;
 }
 
 @media (prefers-color-scheme: dark) {
   .lt-heat-0 {
-    background-color: #282b30;
+    background-color: #272b31;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
   }
   .lt-heat-1 {
-    background-color: #21374f;
+    background-color: #203752;
   }
   .lt-heat-2 {
-    background-color: #2f557d;
+    background-color: #2e5682;
   }
   .lt-heat-3 {
-    background-color: #4b80b8;
+    background-color: #4982c0;
   }
   .lt-heat-4 {
-    background-color: #7eb0e2;
+    background-color: #7eb2e8;
   }
 }
 
 html[data-theme="dark"] .lt-heat-0 {
-  background-color: #282b30;
+  background-color: #272b31;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
 }
 html[data-theme="dark"] .lt-heat-1 {
-  background-color: #21374f;
+  background-color: #203752;
 }
 html[data-theme="dark"] .lt-heat-2 {
-  background-color: #2f557d;
+  background-color: #2e5682;
 }
 html[data-theme="dark"] .lt-heat-3 {
-  background-color: #4b80b8;
+  background-color: #4982c0;
 }
 html[data-theme="dark"] .lt-heat-4 {
-  background-color: #7eb0e2;
+  background-color: #7eb2e8;
 }
 
 html[data-theme="light"] .lt-heat-0 {
-  background-color: #ecebe7;
-  box-shadow: inset 0 0 0 1px rgba(21, 24, 30, 0.035);
+  background-color: #ebeced;
+  box-shadow: inset 0 0 0 1px rgba(20, 23, 31, 0.035);
 }
 html[data-theme="light"] .lt-heat-1 {
-  background-color: #cce0f5;
+  background-color: #cbe0f7;
 }
 html[data-theme="light"] .lt-heat-2 {
-  background-color: #91bbe8;
+  background-color: #8fbbef;
 }
 html[data-theme="light"] .lt-heat-3 {
-  background-color: #4b83c4;
+  background-color: #4985cc;
 }
 html[data-theme="light"] .lt-heat-4 {
-  background-color: #1f508a;
+  background-color: #1e5494;
 }
 
 @media (prefers-contrast: more) {
