@@ -17,3 +17,15 @@
 
 3. **视图切换零跳动（Zero Layout Shift on Toggle）**
    - 在同一卡片内切换时间跨度或视图模式（如「翻译足迹」在「近一个月」与「近一年」之间切换）时，图表区域必须左右满幅贴合容器边界，且保持稳定的垂直高度，避免引发下方板块上下跳动。
+
+## 本机构建与 macOS 签名铁律（防止 TCC 权限失效）
+
+**严禁使用 ad-hoc 签名（`codesign -`）或无证书的裸 `pnpm tauri build` 产物直接覆盖本机 `~/Applications/Light Translate.app`。**
+
+1. **原因**：ad-hoc 签名会将 macOS `designated requirement` 写死为二进制 `cdhash`，每次重编译 `cdhash` 变化都会导致「辅助功能」与「屏幕录制」TCC 权限失效，迫使用户在系统设置中反复重开。
+2. **标准做法**：本地构建与安装**必须**直接运行：
+   ```bash
+   pnpm install:mac
+   ```
+   该脚本（`scripts/install-macos.sh`）会自动使用钥匙串固定证书 `Apple Development: Yisu Wang (G2J5UC64SB)`（SHA-1: `ECC226BD94A8F42B309074E4D3E4E1381F2EDCA2`，配合 `--options runtime`）签名并安装到 `~/Applications/Light Translate.app`。
+3. **验收标准**：安装完成后可执行 `codesign -dv -r - "$HOME/Applications/Light Translate.app"` 自检，确认 `designated =>` 锚定到证书主体 `subject.CN`，**绝不可出现 `cdhash`**。
