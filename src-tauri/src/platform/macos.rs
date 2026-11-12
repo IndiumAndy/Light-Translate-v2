@@ -144,8 +144,12 @@ struct NativeSelectionResponse {
     text: Option<String>,
     source: Option<String>,
     #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
     pointer_inside: Option<bool>,
     rect: Option<ScreenRect>,
+    #[serde(default)]
+    elem_rect: Option<ScreenRect>,
     app_id: Option<String>,
 }
 
@@ -170,6 +174,13 @@ struct NativeHoverAxResponse {
     app_id: Option<String>,
 }
 
+fn is_single_line_input_role(role: Option<&str>) -> bool {
+    matches!(
+        role,
+        Some("AXTextField" | "AXSearchField" | "AXComboBox")
+    )
+}
+
 fn resolve_selection_response(
     resp: NativeSelectionResponse,
     pointer: ScreenPoint,
@@ -181,15 +192,29 @@ fn resolve_selection_response(
         "blockedSensitive" => Err(ExtractionFailure::BlockedSensitive),
         "ok" => {
             if require_pointer_inside {
-                let inside = match resp.pointer_inside {
-                    Some(flag) => flag,
-                    None => resp
-                        .rect
-                        .is_some_and(|r| r.is_valid() && r.inset_by(-6.0, -6.0).contains(pointer)),
-                };
-                if !inside {
-                    return Ok(None);
+                if is_single_line_input_role(resp.role.as_deref()) {
+                    let hit_box = resp
+                        .elem_rect
+                        .filter(|r| r.is_valid())
+                        .or_else(|| resp.rect.filter(|r| r.is_valid()));
+                    let inside = hit_box.is_some_and(|r| r.inset_by(-16.0, -16.0).contains(pointer));
+                    if !inside {
+                        return Ok(None);
+                    }
+                } else if resp.role.is_none() {
+                    let inside = match resp.pointer_inside {
+                        Some(flag) => flag,
+                        None => resp
+                            .rect
+                            .is_some_and(|r| r.is_valid() && r.inset_by(-6.0, -6.0).contains(pointer)),
+                    };
+                    if !inside {
+                        return Ok(None);
+                    }
                 }
+                // For document/content roles (AXWebArea, AXTextArea, AXStaticText, AXGroup, etc.),
+                // any active non-empty selection in the focused app under the pointer is prioritized
+                // even when dragging ends outside text bounds or AX bounds are unavailable.
             }
             let text = resp.text.unwrap_or_default();
             if !is_allowed_input_text(&text) {
@@ -984,22 +1009,45 @@ mod tests {
             status: "ok".into(),
             text: Some("Prompt".into()),
             source: Some("accessibility".into()),
+            role: Some("AXSearchField".into()),
             pointer_inside: Some(false),
             rect: Some(ScreenRect::new(240.0, 110.0, 56.0, 20.0)),
+            elem_rect: Some(ScreenRect::new(220.0, 102.0, 320.0, 32.0)),
             app_id: Some("com.google.Chrome".into()),
         };
         assert_eq!(resolve_selection_response(distant_sel, pt, 4, true), Ok(None));
+
+        // Web/body selection (AXWebArea) without bounds or with cursor slightly past end MUST route to Selection!
+        let web_body_sel = NativeSelectionResponse {
+            status: "ok".into(),
+            text: Some("Selected article sentence".into()),
+            source: Some("accessibility".into()),
+            role: Some("AXWebArea".into()),
+            pointer_inside: Some(false),
+            rect: None,
+            elem_rect: None,
+            app_id: Some("com.google.Chrome".into()),
+        };
+        assert_eq!(
+            resolve_selection_response(web_body_sel, pt, 5, true)
+                .unwrap()
+                .unwrap()
+                .text,
+            "Selected article sentence"
+        );
 
         let explicit_sel = NativeSelectionResponse {
             status: "ok".into(),
             text: Some("Prompt".into()),
             source: Some("accessibility".into()),
+            role: Some("AXSearchField".into()),
             pointer_inside: Some(false),
             rect: Some(ScreenRect::new(240.0, 110.0, 56.0, 20.0)),
+            elem_rect: Some(ScreenRect::new(220.0, 102.0, 320.0, 32.0)),
             app_id: Some("com.google.Chrome".into()),
         };
         assert_eq!(
-            resolve_selection_response(explicit_sel, pt, 5, false)
+            resolve_selection_response(explicit_sel, pt, 6, false)
                 .unwrap()
                 .unwrap()
                 .text,

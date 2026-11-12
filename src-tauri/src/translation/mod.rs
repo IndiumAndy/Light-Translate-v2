@@ -297,6 +297,20 @@ where
         return Err(match status {
             401 | 403 => TranslationError::InvalidApiKey,
             429 => TranslationError::RateLimited,
+            404 => {
+                let err_body = resp.text().await.unwrap_or_default();
+                let short: String = err_body.chars().take(160).collect();
+                if cfg.provider == LlmProviderKind::Gemini {
+                    TranslationError::InvalidResponse(format!(
+                        "模型名称或接口地址不存在 (HTTP 404)，Gemini 推荐使用 {}。详情: {short}",
+                        LlmProviderKind::Gemini.default_model()
+                    ))
+                } else {
+                    TranslationError::InvalidResponse(format!(
+                        "模型名称或接口地址不存在 (HTTP 404): {short}"
+                    ))
+                }
+            }
             _ => {
                 let err_body = resp.text().await.unwrap_or_default();
                 let short: String = err_body.chars().take(160).collect();
@@ -541,6 +555,31 @@ pub async fn test_llm_connection(cfg: &LlmRequestConfig) -> ConnectionTestResult
 // Fast Non-Reasoning Machine Translation Channel (80 ~ 250ms)
 // ============================================================================
 
+pub fn to_fast_mt_lang_code(target_lang: &str) -> &str {
+    let trimmed = target_lang.trim();
+    match trimmed {
+        "简体中文" => "zh-CN",
+        "繁體中文" | "繁体中文" => "zh-TW",
+        "日本語" => "ja",
+        _ => {
+            let lower = trimmed.to_ascii_lowercase();
+            match lower.as_str() {
+                "" | "zh" | "zh-cn" | "zh-hans" | "zh_cn" | "zh_hans" | "chinese" => "zh-CN",
+                "zh-tw" | "zh-hant" | "zh_tw" | "zh_hant" => "zh-TW",
+                "en" | "en-us" | "en-gb" | "english" => "en",
+                "ja" | "ja-jp" | "jp" | "japanese" => "ja",
+                _ if trimmed.is_ascii()
+                    && trimmed.len() <= 8
+                    && !trimmed.contains(char::is_whitespace) =>
+                {
+                    trimmed
+                }
+                _ => "zh-CN",
+            }
+        }
+    }
+}
+
 /// Keyless fast translation through Google's unofficial `client=gtx` endpoint.
 ///
 /// There is no separate engine setting. A previous "Microsoft Edge" option did
@@ -554,18 +593,17 @@ pub async fn translate_fast_machine(
     if clean.is_empty() {
         return Err(TranslationError::InvalidResponse("空文本".into()));
     }
-    // Detect if source is predominantly CJK -> translate to English, otherwise to Chinese
+    // Detect if source is predominantly CJK -> translate to English, otherwise to configured target
     let cjk_count = clean
         .chars()
         .filter(|&c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
         .count();
     let total_alpha = clean.chars().filter(|c| !c.is_whitespace()).count().max(1);
-    let tl = if cjk_count * 2 >= total_alpha {
+    let is_cjk_source = cjk_count * 2 >= total_alpha;
+    let tl = if is_cjk_source {
         "en"
-    } else if target_lang.starts_with("zh") {
-        "zh-CN"
     } else {
-        target_lang
+        to_fast_mt_lang_code(target_lang)
     };
 
     let encoded = urlencoding::encode(clean);
@@ -580,10 +618,13 @@ pub async fn translate_fast_machine(
         .await
         .map_err(|e| TranslationError::Network(e.to_string()))?;
 
+    let status = resp.status().as_u16();
+    if status == 429 {
+        return Err(TranslationError::RateLimited);
+    }
     if !resp.status().is_success() {
         return Err(TranslationError::InvalidResponse(format!(
-            "Fast MT HTTP {}",
-            resp.status().as_u16()
+            "Fast MT HTTP {status}"
         )));
     }
 
@@ -604,6 +645,15 @@ pub async fn translate_fast_machine(
     let trimmed = out.trim().to_string();
     if trimmed.is_empty() {
         return Err(TranslationError::InvalidResponse("极速机翻返回为空".into()));
+    }
+    if !is_cjk_source
+        && tl != "en"
+        && clean.split_whitespace().count() >= 2
+        && trimmed.eq_ignore_ascii_case(clean)
+    {
+        return Err(TranslationError::InvalidResponse(
+            "极速机翻返回未翻译的原文回显".into(),
+        ));
     }
     Ok(trimmed)
 }
@@ -756,5 +806,17 @@ mod tests {
         let fenced = "```json\n[\n  {\"id\": 2, \"translation\": \"原位贴合翻译\"}\n]\n```";
         let map2 = parse_batch_json_translations(fenced).unwrap();
         assert_eq!(map2.get(&2).map(String::as_str), Some("原位贴合翻译"));
+    }
+
+    #[test]
+    fn maps_display_target_languages_to_fast_mt_codes() {
+        assert_eq!(to_fast_mt_lang_code("简体中文"), "zh-CN");
+        assert_eq!(to_fast_mt_lang_code("zh-Hans"), "zh-CN");
+        assert_eq!(to_fast_mt_lang_code("繁體中文"), "zh-TW");
+        assert_eq!(to_fast_mt_lang_code("繁体中文"), "zh-TW");
+        assert_eq!(to_fast_mt_lang_code("zh-Hant"), "zh-TW");
+        assert_eq!(to_fast_mt_lang_code("English"), "en");
+        assert_eq!(to_fast_mt_lang_code("日本語"), "ja");
+        assert_eq!(to_fast_mt_lang_code("fr"), "fr");
     }
 }

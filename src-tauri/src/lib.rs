@@ -27,7 +27,7 @@ use platform::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use storage::{
@@ -45,11 +45,16 @@ use uuid::Uuid;
 
 const DEFAULT_POPUP_WIDTH: f64 = 360.0;
 
+const REQUEST_KIND_NONE: u8 = 0;
+const REQUEST_KIND_HOVER: u8 = 1;
+const REQUEST_KIND_SELECTION: u8 = 2;
+const REQUEST_KIND_TAP: u8 = 3;
+
 fn estimate_initial_popup_height(card: &PopupCardViewState) -> f64 {
     let mut h = if card.scope == ExtractionScope::Word {
-        76.0
+        72.0
     } else {
-        112.0
+        90.0
     };
     if let Some(dict) = &card.dictionary {
         h += (dict.senses.len().min(4) as f64) * 24.0 + 8.0;
@@ -97,6 +102,7 @@ pub struct AppController {
     pub state: Mutex<CoordinatorStateMachine>,
     pub overlay_state: Mutex<OverlayRuntimeState>,
     pub trigger_press_count: AtomicU64,
+    pub active_request_kind: AtomicU8,
     pub tray_toggle_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     pub tray_capture_item: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
@@ -270,10 +276,12 @@ impl AppController {
                     let updated_card = guard.card.visible.then(|| guard.card.clone());
                     let cancel_inflight = settings.dismiss_on_trigger_release
                         && matches!(act, StateTransitionAction::None)
-                        && !guard.card.visible;
+                        && !guard.card.visible
+                        && self.active_request_kind.load(Ordering::Relaxed) == REQUEST_KIND_HOVER;
                     (act, updated_card, cancel_inflight)
                 };
                 if cancel_inflight_hover {
+                    self.active_request_kind.store(REQUEST_KIND_NONE, Ordering::Relaxed);
                     self.gate.invalidate();
                 }
                 self.apply_transition(action);
@@ -335,7 +343,16 @@ impl AppController {
             } => {
                 let ctrl = Arc::clone(self);
                 tauri::async_runtime::spawn(async move {
-                    ctrl.run_hover_flow(pointer, sentence_mode).await;
+                    ctrl.run_hover_flow(pointer, sentence_mode, false).await;
+                });
+            }
+            StateTransitionAction::StartTapExtraction {
+                pointer,
+                sentence_mode,
+            } => {
+                let ctrl = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    ctrl.run_hover_flow(pointer, sentence_mode, true).await;
                 });
             }
             StateTransitionAction::ExpandCurrentCardToSentence => {
@@ -370,38 +387,62 @@ impl AppController {
             return;
         }
 
-        let gen = self.gate.advance();
         let platform = Arc::clone(&self.platform);
         let allow_clip = explicit_trigger && settings.enable_clipboard_fallback;
 
         let res = tokio::task::spawn_blocking(move || {
-            platform.extract_selection(pointer, gen, allow_clip)
+            platform.extract_selection(pointer, 0, allow_clip)
         })
         .await
         .ok();
 
-        if !self.gate.is_current(gen) {
-            return;
-        }
-
         match res {
-            Some(Ok(Some(snapshot))) => {
+            Some(Ok(Some(mut snapshot))) => {
+                {
+                    let guard = self.state.lock();
+                    if guard.card.visible
+                        && guard.card.is_streaming
+                        && guard.card.original_text == snapshot.text
+                    {
+                        return;
+                    }
+                }
+                self.active_request_kind
+                    .store(REQUEST_KIND_SELECTION, Ordering::Relaxed);
+                let gen = self.gate.advance();
+                snapshot.generation = gen;
                 self.present_and_translate(snapshot, true).await;
             }
             Some(Err(failure)) if explicit_trigger => {
+                self.active_request_kind
+                    .store(REQUEST_KIND_SELECTION, Ordering::Relaxed);
+                let gen = self.gate.advance();
                 self.present_status_card(gen, pointer, failure.user_message());
             }
             _ => {}
         }
     }
 
-    pub async fn run_hover_flow(self: &Arc<Self>, pointer: ScreenPoint, sentence_mode: bool) {
+    pub async fn run_hover_flow(
+        self: &Arc<Self>,
+        pointer: ScreenPoint,
+        sentence_mode: bool,
+        from_tap: bool,
+    ) {
         let settings = self.storage.settings();
         let target_app = self.platform.app_id_at_point(pointer);
         if settings.is_app_excluded(target_app.as_deref()) {
             return;
         }
 
+        self.active_request_kind.store(
+            if from_tap {
+                REQUEST_KIND_TAP
+            } else {
+                REQUEST_KIND_HOVER
+            },
+            Ordering::Relaxed,
+        );
         let gen = self.gate.advance();
         let platform = Arc::clone(&self.platform);
         let ocr_enabled = settings.enable_ocr_fallback;
@@ -420,8 +461,8 @@ impl AppController {
             Ok(snapshot) => {
                 let outcome_str = format!("ok:{:?}:{:?}", snapshot.source, snapshot.scope);
                 self.write_diagnostics("hoverExtraction", &outcome_str, target_app.as_deref());
-                let force_interactive = !settings.dismiss_on_trigger_release
-                    && snapshot.scope == ExtractionScope::Selection;
+                let force_interactive =
+                    from_tap || snapshot.scope == ExtractionScope::Selection;
                 self.present_and_translate(snapshot, force_interactive).await;
             }
             Err(ExtractionFailure::PermissionDenied) => {
@@ -435,7 +476,6 @@ impl AppController {
             }
         }
     }
-
     pub async fn expand_current_card_to_sentence(self: &Arc<Self>) {
         let (maybe_ctx, pointer, anchor_rect, source, trigger_held) = {
             let guard = self.state.lock();
@@ -470,7 +510,7 @@ impl AppController {
             self.present_and_translate(snapshot, force_interactive).await;
         } else {
             // Re-extract in sentence mode if no cached sentence context was attached
-            self.run_hover_flow(pointer, true).await;
+            self.run_hover_flow(pointer, true, true).await;
         }
     }
 
@@ -677,13 +717,29 @@ impl AppController {
                 if !ctrl_fast.gate.is_current(gen) {
                     return;
                 }
-                if let Ok(fast_text) = result {
-                    let mut guard = ctrl_fast.state.lock();
-                    if guard.card.generation == gen {
-                        guard.card.fast_translation = Some(fast_text);
-                        let updated = guard.card.clone();
-                        drop(guard);
-                        ctrl_fast.emit_popup_state(&updated);
+                match result {
+                    Ok(fast_text) => {
+                        let mut guard = ctrl_fast.state.lock();
+                        if guard.card.generation == gen {
+                            guard.card.fast_translation = Some(fast_text);
+                            let updated = guard.card.clone();
+                            drop(guard);
+                            ctrl_fast.emit_popup_state(&updated);
+                        }
+                    }
+                    Err(err) => {
+                        let mut guard = ctrl_fast.state.lock();
+                        if guard.card.generation == gen
+                            && !guard.card.is_streaming
+                            && guard.card.llm_translation.is_empty()
+                            && guard.card.dictionary.is_none()
+                            && guard.card.translation_error.is_none()
+                        {
+                            guard.card.translation_error = Some(err.user_message());
+                            let updated = guard.card.clone();
+                            drop(guard);
+                            ctrl_fast.emit_popup_state(&updated);
+                        }
                     }
                 }
             });
@@ -1868,6 +1924,7 @@ pub fn run() {
                 state: Mutex::new(CoordinatorStateMachine::new()),
                 overlay_state: Mutex::new(OverlayRuntimeState::default()),
                 trigger_press_count: AtomicU64::new(0),
+                active_request_kind: AtomicU8::new(REQUEST_KIND_NONE),
                 tray_toggle_item: Mutex::new(None),
                 tray_capture_item: Mutex::new(None),
             });
@@ -2111,5 +2168,40 @@ mod hover_flow_tests {
             .expect("must keep AX label when OCR is disabled");
         assert_eq!(fallback_label.text, "Prompt API Multimodal Input");
         assert_eq!(fallback_label.scope, ExtractionScope::Label);
+    }
+
+    #[test]
+    fn option_extraction_routes_active_selection_and_calibrates_popup_height() {
+        let pointer = ScreenPoint::new(412.0, 331.0);
+        let platform = FakeHoverPlatform {
+            focused_app: Some("com.google.Chrome".into()),
+            app_at_point: Some("com.google.Chrome".into()),
+            selection: Some(ExtractionSnapshot {
+                generation: 9,
+                text: "Selected paragraph text".into(),
+                context: None,
+                sentence_completeness: None,
+                scope: ExtractionScope::Selection,
+                completeness: ExtractionCompleteness::Complete,
+                source: ExtractionSource::Accessibility,
+                anchor_rect: Some(ScreenRect::new(350.0, 320.0, 140.0, 22.0)),
+                pointer,
+                app_id: Some("com.google.Chrome".into()),
+            }),
+            ax_result: Err(ExtractionFailure::NoText),
+            ocr_result: Err(ExtractionFailure::NoText),
+        };
+
+        let resolved = execute_hover_extraction(&platform, pointer, false, true, 9)
+            .expect("selection must route cleanly when present in focused app");
+        assert_eq!(resolved.scope, ExtractionScope::Selection);
+        assert_eq!(resolved.text, "Selected paragraph text");
+
+        let card = PopupCardViewState {
+            scope: ExtractionScope::Selection,
+            interactive: true,
+            ..Default::default()
+        };
+        assert_eq!(estimate_initial_popup_height(&card), 128.0);
     }
 }

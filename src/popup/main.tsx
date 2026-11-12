@@ -68,8 +68,8 @@ function PopupApp() {
 
   // Measure intrinsic content height and sync native window height tightly without jitter
   useLayoutEffect(() => {
-    lastHeightRef.current = 0;
     if (!card.visible) {
+      lastHeightRef.current = 0;
       return;
     }
     const el = contentRef.current;
@@ -90,7 +90,7 @@ function PopupApp() {
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [card.visible, card.generation, isStatusOnly]);
+  }, [card.visible, isStatusOnly]);
 
   if (!card.visible) {
     return <div className="w-full h-full bg-transparent" />;
