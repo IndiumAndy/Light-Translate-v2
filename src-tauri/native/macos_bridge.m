@@ -109,6 +109,8 @@ static bool g_right_opt_down = false;
 static bool g_left_ctrl_down = false;
 static bool g_right_ctrl_down = false;
 static bool g_other_key_during_tap = false;
+static bool g_chord_poisoned = false;
+static bool g_ignoring_synthetic_c = false;
 static CFAbsoluteTime g_last_tap_release_time = 0.0;
 static CGPoint g_tap_press_point = {0, 0};
 static CFAbsoluteTime g_tap_press_time = 0.0;
@@ -116,7 +118,11 @@ static uint32_t g_PopupWindowNumber = 0;
 static id g_global_key_monitor = nil;
 static id g_global_mouse_monitor = nil;
 static id g_local_event_monitor = nil;
-
+static EventHandlerRef g_carbon_hotkey_handler = NULL;
+static EventHotKeyRef g_selection_hotkey_ref = NULL;
+static EventHotKeyRef g_capture_hotkey_ref = NULL;
+static bool g_selection_hotkey_registered = false;
+static bool g_capture_hotkey_registered = false;
 // Device-dependent modifier masks in CGEventFlags / NSEventModifierFlags
 #ifndef NX_DEVICELALTKEYMASK
 #define NX_DEVICELALTKEYMASK 0x00000020
@@ -313,6 +319,97 @@ static uint32_t lt_active_mod_mask(NSEventModifierFlags flags) {
     if ((flags & NSEventModifierFlagCommand) != 0) mask |= LT_MOD_META;
     return mask;
 }
+static UInt32 lt_to_carbon_mods(uint32_t mods) {
+    UInt32 out = 0;
+    if (mods & LT_MOD_CTRL) out |= controlKey;
+    if (mods & LT_MOD_ALT) out |= optionKey;
+    if (mods & LT_MOD_SHIFT) out |= shiftKey;
+    if (mods & LT_MOD_META) out |= cmdKey;
+    return out;
+}
+
+static OSStatus lt_carbon_hotkey_callback(EventHandlerCallRef nextHandler, EventRef event, void *userData) {
+    (void)nextHandler;
+    (void)userData;
+    if (g_shortcut_recording || GetEventKind(event) != kEventHotKeyPressed) {
+        return eventNotHandledErr;
+    }
+    EventHotKeyID hkId;
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(hkId), NULL, &hkId) != noErr) {
+        return eventNotHandledErr;
+    }
+    if (hkId.signature != 'LTRN') {
+        return eventNotHandledErr;
+    }
+
+    g_other_key_during_tap = true;
+    g_chord_poisoned = true;
+    g_last_tap_release_time = 0.0;
+    if (g_trigger_down) {
+        g_trigger_down = false;
+        g_sentence_mod_down = false;
+    }
+
+    CGPoint pt = lt_current_topleft_pointer();
+    if (hkId.id == 1) {
+        lt_emit_event(@{
+            @"kind": @"shortcutSelection",
+            @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
+        });
+        return noErr;
+    }
+    if (hkId.id == 2) {
+        lt_emit_event(@{ @"kind": @"shortcutCapture" });
+        return noErr;
+    }
+    return eventNotHandledErr;
+}
+
+static void lt_sync_carbon_hotkeys_on_main(void) {
+    if (!g_carbon_hotkey_handler) {
+        EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+        InstallApplicationEventHandler(&lt_carbon_hotkey_callback, 1, &spec, NULL, &g_carbon_hotkey_handler);
+    }
+    if (g_selection_hotkey_ref) {
+        UnregisterEventHotKey(g_selection_hotkey_ref);
+        g_selection_hotkey_ref = NULL;
+    }
+    if (g_capture_hotkey_ref) {
+        UnregisterEventHotKey(g_capture_hotkey_ref);
+        g_capture_hotkey_ref = NULL;
+    }
+    g_selection_hotkey_registered = false;
+    g_capture_hotkey_registered = false;
+
+    if (g_shortcut_recording) {
+        return;
+    }
+
+    if (g_selection_keycode >= 0) {
+        EventHotKeyID selId = { 'LTRN', 1 };
+        OSStatus st = RegisterEventHotKey(
+            (UInt32)g_selection_keycode,
+            lt_to_carbon_mods(g_selection_mods),
+            selId,
+            GetApplicationEventTarget(),
+            0,
+            &g_selection_hotkey_ref
+        );
+        g_selection_hotkey_registered = (st == noErr);
+    }
+    if (g_capture_keycode >= 0) {
+        EventHotKeyID capId = { 'LTRN', 2 };
+        OSStatus st = RegisterEventHotKey(
+            (UInt32)g_capture_keycode,
+            lt_to_carbon_mods(g_capture_mods),
+            capId,
+            GetApplicationEventTarget(),
+            0,
+            &g_capture_hotkey_ref
+        );
+        g_capture_hotkey_registered = (st == noErr);
+    }
+}
 
 // Returns true when event matched an app-handled global shortcut (so local monitor can suppress beep)
 static bool lt_handle_ns_event(NSEvent *event) {
@@ -328,13 +425,23 @@ static bool lt_handle_ns_event(NSEvent *event) {
         unsigned short keyCode = [event keyCode];
         lt_sync_modifier_keycodes(keyCode, flags);
 
-        // Ignore Command-chord shortcuts so Cmd+Tab / Cmd+Option+I never false-trigger hover!
         bool cmdHeld = (flags & NSEventModifierFlagCommand) != 0;
         bool shiftHeld = (flags & NSEventModifierFlagShift) != 0;
+        bool optHeld = (flags & NSEventModifierFlagOption) != 0;
+        bool ctrlHeld = (flags & NSEventModifierFlagControl) != 0;
+        bool anyModHeld = cmdHeld || shiftHeld || optHeld || ctrlHeld;
+
+        // Ignore Command/Shift-chord shortcuts so Cmd+Tab / Cmd+Opt+T never false-trigger hover
+        // on release when Command is lifted before Option!
         if (cmdHeld || shiftHeld) {
             g_other_key_during_tap = true;
+            g_chord_poisoned = true;
         }
-        bool nowTrigger = !cmdHeld && lt_is_trigger_active(flags);
+        if (!anyModHeld) {
+            g_chord_poisoned = false;
+        }
+
+        bool nowTrigger = !cmdHeld && !shiftHeld && !g_chord_poisoned && lt_is_trigger_active(flags);
         bool nowSentence = lt_is_sentence_mod_active(flags);
 
         if (nowTrigger && !g_trigger_down) {
@@ -355,7 +462,7 @@ static bool lt_handle_ns_event(NSEvent *event) {
             CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
             double tapDuration = now - g_tap_press_time;
             double moveDist = hypot(pt.x - g_tap_press_point.x, pt.y - g_tap_press_point.y);
-            bool cleanTap = (!g_other_key_during_tap && !cmdHeld && !shiftHeld && tapDuration < 0.28 && moveDist < 12.0);
+            bool cleanTap = (!g_other_key_during_tap && !g_chord_poisoned && !cmdHeld && !shiftHeld && tapDuration < 0.28 && moveDist < 12.0);
 
             lt_emit_event(@{
                 @"kind": @"triggerReleased",
@@ -390,33 +497,44 @@ static bool lt_handle_ns_event(NSEvent *event) {
     }
 
     if (type == NSEventTypeKeyDown) {
-        g_other_key_during_tap = true;
         unsigned short keyCode = [event keyCode];
+        if (g_ignoring_synthetic_c && keyCode == kVK_ANSI_C) {
+            return false;
+        }
         NSEventModifierFlags flags = [event modifierFlags];
+        uint32_t activeMods = lt_active_mod_mask(flags);
+        bool isSelMatch = (g_selection_keycode >= 0 && (int32_t)keyCode == g_selection_keycode && activeMods == g_selection_mods);
+        bool isCapMatch = (g_capture_keycode >= 0 && (int32_t)keyCode == g_capture_keycode && activeMods == g_capture_mods);
+
+        g_other_key_during_tap = true;
+        if (activeMods != 0) {
+            g_chord_poisoned = true;
+        }
+
+        if ([event isARepeat]) {
+            return (keyCode == kVK_Escape || isSelMatch || isCapMatch);
+        }
 
         if (keyCode == kVK_Escape) {
             lt_emit_event(@{ @"kind": @"escapePressed" });
             return false;
         }
 
-        uint32_t activeMods = lt_active_mod_mask(flags);
-
-        // Selection translate shortcut (configurable, default Alt+Cmd+T)
-        if (g_selection_keycode >= 0
-            && (int32_t)keyCode == g_selection_keycode
-            && activeMods == g_selection_mods) {
-            lt_emit_event(@{
-                @"kind": @"shortcutSelection",
-                @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
-            });
+        // Fallback if Carbon RegisterEventHotKey could not claim the global shortcut
+        if (isSelMatch) {
+            if (!g_selection_hotkey_registered) {
+                lt_emit_event(@{
+                    @"kind": @"shortcutSelection",
+                    @"pointer": @{ @"x": @(pt.x), @"y": @(pt.y) }
+                });
+            }
             return true;
         }
 
-        // Region OCR capture shortcut (configurable, default Ctrl+Cmd+S)
-        if (g_capture_keycode >= 0
-            && (int32_t)keyCode == g_capture_keycode
-            && activeMods == g_capture_mods) {
-            lt_emit_event(@{ @"kind": @"shortcutCapture" });
+        if (isCapMatch) {
+            if (!g_capture_hotkey_registered) {
+                lt_emit_event(@{ @"kind": @"shortcutCapture" });
+            }
             return true;
         }
 
@@ -469,6 +587,8 @@ void lt_macos_start_input_monitor(lt_input_event_cb callback) {
             bool consumedShortcut = lt_handle_ns_event(event);
             return consumedShortcut ? nil : event;
         }];
+
+        lt_sync_carbon_hotkeys_on_main();
     });
 }
 
@@ -486,6 +606,9 @@ void lt_macos_update_trigger_config(
     g_selection_keycode = lt_keycode_for_name(selection_key);
     g_capture_mods = capture_mods;
     g_capture_keycode = lt_keycode_for_name(capture_key);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        lt_sync_carbon_hotkeys_on_main();
+    });
 }
 
 void lt_macos_set_shortcut_recording(bool active) {
@@ -493,8 +616,12 @@ void lt_macos_set_shortcut_recording(bool active) {
     if (active) {
         g_trigger_down = false;
         g_sentence_mod_down = false;
+        g_chord_poisoned = false;
         g_last_tap_release_time = 0.0;
     }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        lt_sync_carbon_hotkeys_on_main();
+    });
 }
 
 // ============================================================================
@@ -905,8 +1032,9 @@ static NSString *lt_clipboard_fallback_copy(void) {
         if (entry.count > 0) [backup addObject:entry];
     }
 
-    // 2. Synthesize Cmd+C
-    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+    // 2. Synthesize isolated Cmd+C via private event source so physical Option/Control keys never leak in
+    g_ignoring_synthetic_c = true;
+    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStatePrivate);
     CGEventRef keyDown = CGEventCreateKeyboardEvent(src, (CGKeyCode)kVK_ANSI_C, true);
     CGEventRef keyUp = CGEventCreateKeyboardEvent(src, (CGKeyCode)kVK_ANSI_C, false);
     CGEventSetFlags(keyDown, kCGEventFlagMaskCommand);
@@ -916,7 +1044,7 @@ static NSString *lt_clipboard_fallback_copy(void) {
     if (keyDown) CFRelease(keyDown);
     if (keyUp) CFRelease(keyUp);
     if (src) CFRelease(src);
-
+    g_ignoring_synthetic_c = false;
     // 3. Poll up to ~35ms for pasteboard update
     NSString *copied = nil;
     for (int i = 0; i < 7; i++) {
@@ -978,6 +1106,9 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
             return lt_json_encode(@{ @"status": @"blockedSensitive" });
         }
 
+        NSString *role = lt_ax_string(focused, kAXRoleAttribute);
+        CGRect elemRect = CGRectZero;
+        bool hasElemRect = lt_ax_frame(focused, &elemRect);
         NSString *selText = lt_ax_string(focused, kAXSelectedTextAttribute);
         CGRect selBounds = CGRectZero;
         bool hasBounds = false;
@@ -998,6 +1129,24 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
                 }
             }
             CFRelease(rangeRef);
+        }
+
+        if (!hasBounds) {
+            CFTypeRef markerRange = NULL;
+            if (AXUIElementCopyAttributeValue(focused, CFSTR("AXSelectedTextMarkerRange"), &markerRange) == kAXErrorSuccess && markerRange) {
+                CFTypeRef boundsVal = NULL;
+                if (AXUIElementCopyParameterizedAttributeValue(focused, CFSTR("AXBoundsForTextMarkerRange"), markerRange, &boundsVal) == kAXErrorSuccess && boundsVal) {
+                    if (CFGetTypeID(boundsVal) == AXValueGetTypeID()) {
+                        CGRect r = CGRectZero;
+                        if (AXValueGetValue((AXValueRef)boundsVal, kAXValueCGRectType, &r) && r.size.width > 0 && r.size.height > 0) {
+                            selBounds = r;
+                            hasBounds = true;
+                        }
+                    }
+                    CFRelease(boundsVal);
+                }
+                CFRelease(markerRange);
+            }
         }
 
         bool pointerInside = false;
@@ -1021,6 +1170,7 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
                 @"status": @"ok",
                 @"text": trimmed,
                 @"source": @"accessibility",
+                @"role": role ?: [NSNull null],
                 @"pointerInside": @(pointerInside),
                 @"appId": appId ?: [NSNull null]
             } mutableCopy];
@@ -1030,6 +1180,14 @@ char *lt_macos_extract_selection_json(double x, double y, bool allow_clipboard_f
                     @"y": @(selBounds.origin.y),
                     @"width": @(selBounds.size.width),
                     @"height": @(selBounds.size.height)
+                };
+            }
+            if (hasElemRect) {
+                resp[@"elemRect"] = @{
+                    @"x": @(elemRect.origin.x),
+                    @"y": @(elemRect.origin.y),
+                    @"width": @(elemRect.size.width),
+                    @"height": @(elemRect.size.height)
                 };
             }
             return lt_json_encode(resp);

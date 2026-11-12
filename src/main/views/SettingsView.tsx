@@ -494,7 +494,7 @@ export function SettingsView({
                         <div className="py-3.5 flex items-center justify-between gap-6">
                           <div className="min-w-0 space-y-0.5">
                             <div className="text-[14px] font-medium text-primary">悬停触发键</div>
-                            <Text type="supporting">按住该修饰键将光标移至文字即可取词</Text>
+                            <Text type="supporting">无选区时点按或按住取词，有选区时点按直接翻译选区</Text>
                           </div>
                           <div className="w-48 shrink-0">
                             <Selector

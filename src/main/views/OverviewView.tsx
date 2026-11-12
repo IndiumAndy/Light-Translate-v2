@@ -30,7 +30,7 @@ import {
 } from "../shortcuts";
 
 export type SettingsPane = "interaction" | "engine" | "system";
-type HeatmapRange = "26w" | "52w";
+type HeatmapRange = "1m" | "1y";
 
 const WEEKDAY_NAMES_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
@@ -54,6 +54,15 @@ function buildHeatmapWeeks(cells: HeatmapDayCell[]): (HeatmapDayCell | null)[][]
   return weeks;
 }
 
+function formatMonthDayLabel(dateStr: string): string {
+  const parts = dateStr.split("-");
+  if (parts.length !== 3) return dateStr;
+  const month = parseInt(parts[1], 10);
+  const day = parseInt(parts[2], 10);
+  if (Number.isNaN(month) || Number.isNaN(day)) return dateStr;
+  return `${month}月${day}日`;
+}
+
 function heatLevelClass(level: number): string {
   switch (level) {
     case 1:
@@ -75,7 +84,6 @@ export interface OverviewViewProps {
   entries: SavedEntry[];
   isMac: boolean;
   defaultCaptureShortcut: string;
-  defaultSelectionShortcut: string;
   onNavigateTranslate: () => void;
   onNavigateWordbook: () => void;
   onNavigateSettings: (pane?: SettingsPane) => void;
@@ -87,23 +95,40 @@ export function OverviewView({
   entries,
   isMac,
   defaultCaptureShortcut,
-  defaultSelectionShortcut,
   onNavigateTranslate,
   onNavigateWordbook,
   onNavigateSettings,
 }: OverviewViewProps) {
-  const [heatmapRange, setHeatmapRange] = useState<HeatmapRange>("26w");
+  const [heatmapRange, setHeatmapRange] = useState<HeatmapRange>("1m");
   const [hoveredDay, setHoveredDay] = useState<HeatmapDayCell | null>(null);
   const [pinnedDay, setPinnedDay] = useState<HeatmapDayCell | null>(null);
 
+  const allHeatmapDays = usageStats?.heatmap ?? [];
+
+  const monthHeatmapDays = useMemo(() => {
+    return allHeatmapDays.slice(-30);
+  }, [allHeatmapDays]);
+
+  const monthMarkers = useMemo(() => {
+    if (monthHeatmapDays.length === 0) return [];
+    const lastIdx = monthHeatmapDays.length - 1;
+    const indices = Array.from(
+      new Set([0, 7, 14, 21, lastIdx].filter((idx) => idx >= 0 && idx <= lastIdx))
+    );
+    return indices.map((idx) => ({
+      idx,
+      isLast: idx === lastIdx && lastIdx > 0,
+      label: formatMonthDayLabel(monthHeatmapDays[idx].date),
+    }));
+  }, [monthHeatmapDays]);
+
   const visibleHeatmapWeeks = useMemo(() => {
-    const all = buildHeatmapWeeks(usageStats?.heatmap ?? []);
-    return heatmapRange === "26w" ? all.slice(-26) : all;
-  }, [usageStats, heatmapRange]);
+    return buildHeatmapWeeks(allHeatmapDays);
+  }, [allHeatmapDays]);
 
   const heatmapMonthMarkers = useMemo(() => {
     const markers: { colIdx: number; label: string }[] = [];
-    const minColGap = heatmapRange === "26w" ? 3 : 4;
+    const minColGap = 4;
 
     visibleHeatmapWeeks.forEach((week, colIdx) => {
       const firstOfMonth = week.find((c) => c?.date.endsWith("-01"));
@@ -131,7 +156,7 @@ export function OverviewView({
     });
 
     return markers;
-  }, [visibleHeatmapWeeks, heatmapRange]);
+  }, [visibleHeatmapWeeks]);
 
   const todayCell =
     usageStats && usageStats.heatmap.length > 0
@@ -152,12 +177,11 @@ export function OverviewView({
   }, [usageStats]);
 
   const captureKbd = toAstryxKbdKeys(settings?.captureShortcut ?? defaultCaptureShortcut);
-  const selectionKbd = toAstryxKbdKeys(settings?.selectionShortcut ?? defaultSelectionShortcut);
   const hoverModKbd = triggerModifierKbdKeys(settings?.triggerModifier);
   const hoverModText = triggerModifierLabel(settings?.triggerModifier, isMac);
 
-  const cellGapCls = heatmapRange === "26w" ? "gap-[4px]" : "gap-[2.5px]";
-  const cellRadiusCls = heatmapRange === "26w" ? "rounded-[3px]" : "rounded-[2px]";
+  const cellGapCls = "gap-[2.5px]";
+  const cellRadiusCls = "rounded-[2px]";
 
   return (
     <Layout
@@ -228,48 +252,39 @@ export function OverviewView({
               </MetadataListItem>
             </MetadataList>
 
-            {/* Single Hero Card: Reading Cadence Heatmap with 26W / 52W SegmentedControl */}
+            {/* Single Hero Card: Translation Cadence Heatmap with 1M / 1Y SegmentedControl */}
             <Card>
               <VStack gap={3}>
                 <HStack justify="between" align="center" gap={3}>
-                  <Heading level={3}>阅读足迹</Heading>
+                  <Heading level={3}>翻译足迹</Heading>
                   <SegmentedControl
                     size="sm"
                     label="热力图时间跨度"
                     value={heatmapRange}
                     onChange={(val) => setHeatmapRange(val as HeatmapRange)}
                   >
-                    <SegmentedControlItem value="26w" label="近 26 周" />
-                    <SegmentedControlItem value="52w" label="近 52 周" />
+                    <SegmentedControlItem value="1m" label="近一个月" />
+                    <SegmentedControlItem value="1y" label="近一年" />
                   </SegmentedControl>
                 </HStack>
 
-                {visibleHeatmapWeeks.length > 0 ? (
-                  <div className="flex items-stretch gap-2.5 select-none pt-0.5">
-                    {/* Weekday Y-Axis */}
-                    <div className="w-4 shrink-0 flex flex-col pt-5" aria-hidden="true">
-                      <div className={`flex-1 grid grid-rows-7 ${cellGapCls} text-xs text-secondary`}>
-                        <span className="flex items-center leading-none">一</span>
-                        <span />
-                        <span className="flex items-center leading-none">三</span>
-                        <span />
-                        <span className="flex items-center leading-none">五</span>
-                        <span />
-                        <span className="flex items-center leading-none">日</span>
-                      </div>
-                    </div>
-
-                    {/* Month Header + Week Columns */}
-                    <div className="flex-1 min-w-0" onMouseLeave={() => setHoveredDay(null)}>
-                      <div className="relative h-4 mb-1" aria-hidden="true">
-                        {heatmapMonthMarkers.map((m) => (
+                {allHeatmapDays.length > 0 ? (
+                  heatmapRange === "1m" ? (
+                    <div
+                      className="h-[108px] flex flex-col select-none pt-0.5"
+                      onMouseLeave={() => setHoveredDay(null)}
+                    >
+                      <div className="relative h-4 mb-1 shrink-0" aria-hidden="true">
+                        {monthMarkers.map((m) => (
                           <span
-                            key={`${m.colIdx}-${m.label}`}
-                            style={{
-                              left: `${
-                                (m.colIdx / Math.max(visibleHeatmapWeeks.length, 1)) * 100
-                              }%`,
-                            }}
+                            key={`${m.idx}-${m.label}`}
+                            style={
+                              m.isLast
+                                ? { right: 0 }
+                                : {
+                                    left: `${(m.idx / Math.max(monthHeatmapDays.length, 1)) * 100}%`,
+                                  }
+                            }
                             className="absolute top-0 text-xs leading-none text-secondary whitespace-nowrap"
                           >
                             {m.label}
@@ -278,64 +293,166 @@ export function OverviewView({
                       </div>
 
                       <div
-                        className={`grid ${cellGapCls}`}
+                        className="flex-1 min-h-0 grid gap-[4px]"
                         style={{
                           gridTemplateColumns: `repeat(${Math.max(
-                            visibleHeatmapWeeks.length,
+                            monthHeatmapDays.length,
                             1
                           )}, minmax(0, 1fr))`,
                         }}
                       >
-                        {visibleHeatmapWeeks.map((week, colIdx) => (
-                          <div key={colIdx} className={`grid grid-rows-7 ${cellGapCls}`}>
-                            {week.map((cell, rowIdx) => {
-                              if (!cell) {
-                                return (
-                                  <div
-                                    key={rowIdx}
-                                    className={`aspect-square w-full ${cellRadiusCls} opacity-0 pointer-events-none`}
-                                  />
-                                );
+                        {monthHeatmapDays.map((cell) => {
+                          const isToday = cell.date === usageStats?.todayDate;
+                          const isPinned = pinnedDay?.date === cell.date;
+                          const weekdayText =
+                            WEEKDAY_NAMES_ZH[Math.max(0, Math.min(6, cell.weekday - 1))];
+                          return (
+                            <button
+                              key={cell.date}
+                              type="button"
+                              aria-label={`${cell.date} ${weekdayText}：${cell.wordCount} 词，${cell.queryCount} 次查词`}
+                              title={`${cell.date} ${weekdayText} · ${cell.wordCount.toLocaleString()} 词`}
+                              onMouseEnter={() => setHoveredDay(cell)}
+                              onFocus={() => setHoveredDay(cell)}
+                              onBlur={() => setHoveredDay(null)}
+                              onClick={() =>
+                                setPinnedDay((prev) =>
+                                  prev?.date === cell.date ? null : cell
+                                )
                               }
-                              const isToday = cell.date === usageStats?.todayDate;
-                              const isPinned = pinnedDay?.date === cell.date;
-                              const weekdayText =
-                                WEEKDAY_NAMES_ZH[Math.max(0, Math.min(6, cell.weekday - 1))];
-                              return (
-                                <button
-                                  key={cell.date}
-                                  type="button"
-                                  aria-label={`${cell.date} ${weekdayText}：${cell.wordCount} 词，${cell.queryCount} 次查词`}
-                                  title={`${cell.date} ${weekdayText} · ${cell.wordCount.toLocaleString()} 词`}
-                                  onMouseEnter={() => setHoveredDay(cell)}
-                                  onFocus={() => setHoveredDay(cell)}
-                                  onBlur={() => setHoveredDay(null)}
-                                  onClick={() =>
-                                    setPinnedDay((prev) =>
-                                      prev?.date === cell.date ? null : cell
-                                    )
-                                  }
-                                  className={`aspect-square w-full ${cellRadiusCls} cursor-pointer transition-transform duration-100 motion-reduce:transition-none hover:ring-1 hover:ring-[var(--color-text-primary)]/45 ${heatLevelClass(
-                                    cell.level
-                                  )} ${
-                                    isPinned
-                                      ? "ring-2 ring-[var(--color-accent)] ring-offset-1 ring-offset-[var(--color-background-card)] z-10"
-                                      : isToday
-                                        ? "ring-1 ring-[var(--color-text-primary)]/40"
-                                        : ""
-                                  }`}
-                                />
-                              );
-                            })}
-                          </div>
-                        ))}
+                              className={`h-full w-full rounded-[4px] cursor-pointer transition-transform duration-100 motion-reduce:transition-none hover:ring-1 hover:ring-[var(--color-text-primary)]/45 ${heatLevelClass(
+                                cell.level
+                              )} ${
+                                isPinned
+                                  ? "ring-2 ring-[var(--color-accent)] ring-offset-1 ring-offset-[var(--color-background-card)] z-10"
+                                  : isToday
+                                    ? "ring-1 ring-[var(--color-text-primary)]/40"
+                                    : ""
+                              }`}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      <div
+                        className="h-4 mt-1 shrink-0 grid gap-[4px] items-center text-[10px] leading-none text-secondary tabular-nums"
+                        style={{
+                          gridTemplateColumns: `repeat(${Math.max(
+                            monthHeatmapDays.length,
+                            1
+                          )}, minmax(0, 1fr))`,
+                        }}
+                        aria-hidden="true"
+                      >
+                        {monthHeatmapDays.map((cell) => {
+                          const dayNum = parseInt(cell.date.slice(8, 10), 10);
+                          const isToday = cell.date === usageStats?.todayDate;
+                          return (
+                            <span
+                              key={cell.date}
+                              className={`text-center ${
+                                isToday ? "font-semibold text-primary" : ""
+                              }`}
+                            >
+                              {Number.isNaN(dayNum) ? "" : dayNum}
+                            </span>
+                          );
+                        })}
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="h-[108px] flex items-start gap-2.5 select-none pt-0.5">
+                      {/* Weekday Y-Axis */}
+                      <div className="w-4 shrink-0 flex flex-col pt-5" aria-hidden="true">
+                        <div className={`grid grid-rows-7 ${cellGapCls} text-xs text-secondary`}>
+                          <span className="flex items-center leading-none">一</span>
+                          <span />
+                          <span className="flex items-center leading-none">三</span>
+                          <span />
+                          <span className="flex items-center leading-none">五</span>
+                          <span />
+                          <span className="flex items-center leading-none">日</span>
+                        </div>
+                      </div>
+
+                      {/* Month Header + Week Columns */}
+                      <div className="flex-1 min-w-0" onMouseLeave={() => setHoveredDay(null)}>
+                        <div className="relative h-4 mb-1" aria-hidden="true">
+                          {heatmapMonthMarkers.map((m) => (
+                            <span
+                              key={`${m.colIdx}-${m.label}`}
+                              style={{
+                                left: `${
+                                  (m.colIdx / Math.max(visibleHeatmapWeeks.length, 1)) * 100
+                                }%`,
+                              }}
+                              className="absolute top-0 text-xs leading-none text-secondary whitespace-nowrap"
+                            >
+                              {m.label}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div
+                          className={`grid ${cellGapCls}`}
+                          style={{
+                            gridTemplateColumns: `repeat(${Math.max(
+                              visibleHeatmapWeeks.length,
+                              1
+                            )}, minmax(0, 1fr))`,
+                          }}
+                        >
+                          {visibleHeatmapWeeks.map((week, colIdx) => (
+                            <div key={colIdx} className={`grid grid-rows-7 ${cellGapCls}`}>
+                              {week.map((cell, rowIdx) => {
+                                if (!cell) {
+                                  return (
+                                    <div
+                                      key={rowIdx}
+                                      className={`aspect-square w-full ${cellRadiusCls} opacity-0 pointer-events-none`}
+                                    />
+                                  );
+                                }
+                                const isToday = cell.date === usageStats?.todayDate;
+                                const isPinned = pinnedDay?.date === cell.date;
+                                const weekdayText =
+                                  WEEKDAY_NAMES_ZH[Math.max(0, Math.min(6, cell.weekday - 1))];
+                                return (
+                                  <button
+                                    key={cell.date}
+                                    type="button"
+                                    aria-label={`${cell.date} ${weekdayText}：${cell.wordCount} 词，${cell.queryCount} 次查词`}
+                                    title={`${cell.date} ${weekdayText} · ${cell.wordCount.toLocaleString()} 词`}
+                                    onMouseEnter={() => setHoveredDay(cell)}
+                                    onFocus={() => setHoveredDay(cell)}
+                                    onBlur={() => setHoveredDay(null)}
+                                    onClick={() =>
+                                      setPinnedDay((prev) =>
+                                        prev?.date === cell.date ? null : cell
+                                      )
+                                    }
+                                    className={`aspect-square w-full ${cellRadiusCls} cursor-pointer transition-transform duration-100 motion-reduce:transition-none hover:ring-1 hover:ring-[var(--color-text-primary)]/45 ${heatLevelClass(
+                                      cell.level
+                                    )} ${
+                                      isPinned
+                                        ? "ring-2 ring-[var(--color-accent)] ring-offset-1 ring-offset-[var(--color-background-card)] z-10"
+                                        : isToday
+                                          ? "ring-1 ring-[var(--color-text-primary)]/40"
+                                          : ""
+                                    }`}
+                                  />
+                                );
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )
                 ) : (
                   <EmptyState
                     isCompact
-                    title="暂无阅读记录"
+                    title="暂无翻译记录"
                     description="按住修饰键屏幕取词，或在「翻译」中输入文本。"
                     actions={
                       <Button
@@ -347,7 +464,6 @@ export function OverviewView({
                     }
                   />
                 )}
-
                 <Divider />
 
                 {/* Readout & Prussian Ink Legend */}
@@ -389,9 +505,8 @@ export function OverviewView({
 
                   <div
                     className="flex items-center gap-1.5 select-none"
-                    aria-label="阅读量深浅图例"
+                    aria-label="翻译量深浅图例"
                   >
-                    <Text type="supporting">少</Text>
                     {[0, 1, 2, 3, 4].map((lv) => (
                       <span
                         key={lv}
@@ -408,22 +523,25 @@ export function OverviewView({
             <Grid columns={{ minWidth: 260, repeat: "fit" }} gap={6}>
               <section className="min-w-0">
                 <VStack gap={2}>
-                  <HStack justify="between" align="center">
+                  <div className="h-7 flex items-center justify-between">
                     <Heading level={4}>快捷触发</Heading>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      label="设置"
-                      onClick={() => onNavigateSettings("interaction")}
-                    />
-                  </HStack>
+                    <div className="-mr-3">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        label="设置"
+                        onClick={() => onNavigateSettings("interaction")}
+                      />
+                    </div>
+                  </div>
 
                   <Divider />
 
-                  <List density="compact" hasDividers>
+                  <List edge="flush" density="compact" hasDividers>
                     <ListItem
-                      label="悬停取词"
-                      description="按住修饰键悬停于文字上方"
+                      className="min-h-[50px]"
+                      label="单词取词"
+                      description="未选中文本时点按或按住修饰键"
                       endContent={
                         settings?.triggerModifier === "leftOption" ||
                         settings?.triggerModifier === "rightOption" ? (
@@ -436,21 +554,22 @@ export function OverviewView({
                       }
                     />
                     <ListItem
-                      label="划词翻译"
-                      description="选中文本后唤起译文浮窗"
+                      className="min-h-[50px]"
+                      label="划线翻译"
+                      description="选中文本后点按修饰键直接翻译"
                       endContent={
-                        selectionKbd ? (
-                          <Kbd keys={selectionKbd} />
-                        ) : settings?.doubleTapSelection ? (
+                        settings?.triggerModifier === "leftOption" ||
+                        settings?.triggerModifier === "rightOption" ? (
                           <Text type="supporting" weight="medium">
-                            双击 {hoverModText}
+                            {hoverModText}
                           </Text>
                         ) : (
-                          <Text type="supporting">未绑定</Text>
+                          <Kbd keys={hoverModKbd} />
                         )
                       }
                     />
                     <ListItem
+                      className="min-h-[50px]"
                       label="区域截屏"
                       description="框选屏幕区域识别并翻译"
                       endContent={
@@ -467,41 +586,40 @@ export function OverviewView({
 
               <section className="min-w-0">
                 <VStack gap={2}>
-                  <HStack justify="between" align="center">
+                  <div className="h-7 flex items-center justify-between">
                     <Heading level={4}>近期收录</Heading>
                     {entries.length > 0 && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        label="查看全部"
-                        onClick={onNavigateWordbook}
-                      />
+                      <div className="-mr-3">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          label="查看全部"
+                          onClick={onNavigateWordbook}
+                        />
+                      </div>
                     )}
-                  </HStack>
+                  </div>
 
                   <Divider />
 
                   {entries.length > 0 ? (
-                    <List density="compact" hasDividers>
+                    <List edge="flush" density="compact" hasDividers>
                       {entries.slice(0, 3).map((item) => (
                         <ListItem
                           key={item.id}
+                          className="min-h-[50px]"
                           onClick={onNavigateWordbook}
                           label={
-                            <span className="lt-serif text-[15.5px] font-semibold text-primary">
+                            <span className="lt-serif text-[14.5px] leading-[17px] font-semibold text-primary block truncate">
                               {item.source}
                             </span>
                           }
-                          description={
-                            <Text type="supporting" maxLines={1}>
-                              {item.translation}
-                            </Text>
-                          }
+                          description={item.translation}
                         />
                       ))}
                     </List>
                   ) : (
-                    <div className="pt-2">
+                    <div className="h-[150px] flex items-center justify-center">
                       <EmptyState
                         isCompact
                         icon={<Bookmark className="w-5 h-5 text-secondary" strokeWidth={1.75} />}

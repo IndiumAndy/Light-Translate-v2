@@ -92,7 +92,7 @@ impl Default for AppSettings {
                 base_url: LlmProviderKind::OpenaiCompatible.default_base_url().into(),
                 model: LlmProviderKind::OpenaiCompatible.default_model().into(),
             },
-            target_language: "zh-Hans".into(),
+            target_language: "简体中文".into(),
             excluded_apps: vec![
                 "com.1password.1password".into(),
                 "com.bitwarden.desktop".into(),

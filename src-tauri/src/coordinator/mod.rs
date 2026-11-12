@@ -127,11 +127,14 @@ pub enum StateTransitionAction {
         pointer: ScreenPoint,
         sentence_mode: bool,
     },
+    StartTapExtraction {
+        pointer: ScreenPoint,
+        sentence_mode: bool,
+    },
     ExpandCurrentCardToSentence,
     SetPopupInteractive(bool),
     DismissPopup,
 }
-
 impl Default for CoordinatorStateMachine {
     fn default() -> Self {
         Self::new()
@@ -216,8 +219,8 @@ impl CoordinatorStateMachine {
                 }
                 StateTransitionAction::SetPopupInteractive(true)
             }
-            _ if !dismiss_on_release && clean_tap && had_pending_dwell => {
-                StateTransitionAction::StartHoverExtraction {
+            _ if clean_tap && had_pending_dwell => {
+                StateTransitionAction::StartTapExtraction {
                     pointer,
                     sentence_mode: was_sentence_mod,
                 }
@@ -573,13 +576,25 @@ mod tests {
         let t0 = Instant::now();
         let pt = ScreenPoint::new(420.0, 310.0);
 
-        // Quick standalone tap (< 150ms dwell) with linger mode -> starts hover extraction immediately on release!
+        // Quick standalone tap (< 150ms dwell) with linger mode -> starts tap extraction immediately on release!
         sm.on_trigger_pressed(pt, false, t0, 150);
         let tap_act =
             sm.on_trigger_released(pt, true, t0 + Duration::from_millis(75), false, 2500);
         assert_eq!(
             tap_act,
-            StateTransitionAction::StartHoverExtraction {
+            StateTransitionAction::StartTapExtraction {
+                pointer: pt,
+                sentence_mode: false
+            }
+        );
+
+        // Quick standalone tap ALSO works when `dismiss_on_release = true`!
+        sm.on_trigger_pressed(pt, false, t0 + Duration::from_millis(200), 150);
+        let tap_act_dismiss_mode =
+            sm.on_trigger_released(pt, true, t0 + Duration::from_millis(275), true, 2500);
+        assert_eq!(
+            tap_act_dismiss_mode,
+            StateTransitionAction::StartTapExtraction {
                 pointer: pt,
                 sentence_mode: false
             }
@@ -617,20 +632,19 @@ mod tests {
         );
         assert!(matches!(sm.phase, CardPhase::HoldingPassThrough { .. }));
 
-        // Releasing Option with `dismiss_on_release = true` closes popup immediately!
+        // Releasing Option with `dismiss_on_release = true` closes hold-hover popup immediately!
         let rel = sm.on_trigger_released(pt, false, t0 + Duration::from_millis(240), true, 2500);
         assert_eq!(rel, StateTransitionAction::DismissPopup);
         assert!(!sm.card.visible);
         assert_eq!(sm.phase, CardPhase::Hidden);
 
-        // Quick tap before dwell with `dismiss_on_release = true` cancels pending dwell cleanly
+        // Non-clean release before dwell (e.g., pointer moved or chord) cancels pending dwell cleanly
         sm.on_trigger_pressed(pt, false, t0 + Duration::from_millis(300), 150);
-        let tap_rel =
-            sm.on_trigger_released(pt, true, t0 + Duration::from_millis(360), true, 2500);
-        assert_eq!(tap_rel, StateTransitionAction::None);
+        let non_clean_rel =
+            sm.on_trigger_released(pt, false, t0 + Duration::from_millis(360), true, 2500);
+        assert_eq!(non_clean_rel, StateTransitionAction::None);
         assert!(!sm.card.visible);
     }
-
     #[test]
     fn oversized_word_anchor_rect_does_not_freeze_reextraction_when_sliding_cursor() {
         let mut sm = CoordinatorStateMachine::new();

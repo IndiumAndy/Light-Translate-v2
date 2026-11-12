@@ -3,9 +3,9 @@ import "./main.css";
 import React, { useCallback, useEffect, useRef, useState, type SVGProps } from "react";
 import ReactDOM from "react-dom/client";
 import { AppShell } from "@astryxdesign/core/AppShell";
-import { NavIcon } from "@astryxdesign/core/NavIcon";
 import {
   SideNav,
+  SideNavCollapseButton,
   SideNavHeading,
   SideNavItem,
   SideNavSection,
@@ -250,43 +250,48 @@ function MainWorkspace() {
           collapsible={{
             isCollapsed: navCollapsed,
             onCollapsedChange: setNavCollapsed,
+            hasButton: false,
             buttonLabel: navCollapsed ? "展开侧边栏" : "收起侧边栏",
           }}
-          style={navCollapsed ? undefined : { width: 220 }}
+          style={navCollapsed ? undefined : { width: 232 }}
           header={
             <SideNavHeading
               heading="Light Translate"
               icon={
-                <NavIcon
-                  icon={<Languages className="w-4 h-4" strokeWidth={1.9} />}
+                <Languages
+                  className="w-4 h-4 text-[var(--color-icon-accent)]"
+                  strokeWidth={1.75}
                 />
               }
               headerEndContent={
-                settings ? (
-                  <Tooltip
-                    placement="below"
-                    content={
-                      settings.enabled
-                        ? "全局取词运行中（点击暂停）"
-                        : "全局取词已暂停（点击开启）"
-                    }
-                  >
-                    <button
-                      type="button"
-                      aria-label={settings.enabled ? "暂停全局取词" : "开启全局取词"}
-                      aria-pressed={settings.enabled}
-                      onClick={() =>
-                        persistSettings({ ...settings, enabled: !settings.enabled })
+                <div className="flex items-center gap-0.5 -mr-1.5">
+                  {settings && (
+                    <Tooltip
+                      placement="below"
+                      content={
+                        settings.enabled
+                          ? "全局取词运行中（点击暂停）"
+                          : "全局取词已暂停（点击开启）"
                       }
-                      className="w-6 h-6 rounded-full inline-flex items-center justify-center hover:bg-[var(--color-overlay-hover)] cursor-pointer transition-colors"
                     >
-                      <StatusDot
-                        variant={settings.enabled ? "success" : "neutral"}
-                        label={settings.enabled ? "全局取词运行中" : "全局取词已暂停"}
-                      />
-                    </button>
-                  </Tooltip>
-                ) : undefined
+                      <button
+                        type="button"
+                        aria-label={settings.enabled ? "暂停全局取词" : "开启全局取词"}
+                        aria-pressed={settings.enabled}
+                        onClick={() =>
+                          persistSettings({ ...settings, enabled: !settings.enabled })
+                        }
+                        className="w-5 h-6 rounded-[var(--radius-element)] inline-flex items-center justify-center hover:bg-[var(--color-overlay-hover)] cursor-pointer transition-colors"
+                      >
+                        <StatusDot
+                          variant={settings.enabled ? "success" : "neutral"}
+                          label={settings.enabled ? "全局取词运行中" : "全局取词已暂停"}
+                        />
+                      </button>
+                    </Tooltip>
+                  )}
+                  <SideNavCollapseButton size="sm" />
+                </div>
               }
             />
           }
@@ -306,6 +311,7 @@ function MainWorkspace() {
               }
             />
           }
+          footerIcons={navCollapsed ? <SideNavCollapseButton size="sm" /> : undefined}
         >
           <SideNavSection title="主菜单" isHeaderHidden>
             <SideNavItem
@@ -347,7 +353,6 @@ function MainWorkspace() {
               entries={entries}
               isMac={isMac}
               defaultCaptureShortcut={defaultCaptureShortcut}
-              defaultSelectionShortcut={defaultSelectionShortcut}
               onNavigateTranslate={() => setTab("translate")}
               onNavigateWordbook={() => setTab("wordbook")}
               onNavigateSettings={openSettingsPane}

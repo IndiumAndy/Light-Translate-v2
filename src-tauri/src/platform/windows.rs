@@ -74,6 +74,7 @@ struct HookRuntimeState {
     tap_press_time: Option<Instant>,
     tap_press_point: ScreenPoint,
     last_tap_release: Option<Instant>,
+    shortcut_key_down: Option<u32>,
 }
 
 impl Default for HookRuntimeState {
@@ -85,6 +86,7 @@ impl Default for HookRuntimeState {
             tap_press_time: None,
             tap_press_point: ScreenPoint::default(),
             last_tap_release: None,
+            shortcut_key_down: None,
         }
     }
 }
@@ -189,18 +191,35 @@ unsafe extern "system" fn keyboard_hook_proc(
         let sel_bind = *SELECTION_SHORTCUT.lock();
         let cap_bind = *CAPTURE_SHORTCUT.lock();
 
+        if is_up {
+            let mut st = HOOK_STATE.lock();
+            if st.shortcut_key_down == Some(vk) {
+                st.shortcut_key_down = None;
+            }
+        }
+
         if is_down && vk == VK_ESCAPE.0 as u32 {
             emit_event(PlatformInputEvent::EscapePressed);
         } else if is_down
             && sel_bind.is_some_and(|(mods, target_vk)| active_mods == mods && vk == target_vk)
         {
-            HOOK_STATE.lock().other_key_during_tap = true;
-            emit_event(PlatformInputEvent::ShortcutSelection { pointer });
+            let mut st = HOOK_STATE.lock();
+            if st.shortcut_key_down != Some(vk) {
+                st.shortcut_key_down = Some(vk);
+                st.other_key_during_tap = true;
+                drop(st);
+                emit_event(PlatformInputEvent::ShortcutSelection { pointer });
+            }
         } else if is_down
             && cap_bind.is_some_and(|(mods, target_vk)| active_mods == mods && vk == target_vk)
         {
-            HOOK_STATE.lock().other_key_during_tap = true;
-            emit_event(PlatformInputEvent::ShortcutCapture);
+            let mut st = HOOK_STATE.lock();
+            if st.shortcut_key_down != Some(vk) {
+                st.shortcut_key_down = Some(vk);
+                st.other_key_during_tap = true;
+                drop(st);
+                emit_event(PlatformInputEvent::ShortcutCapture);
+            }
         } else if is_trigger_vk(vk, kind) {
             if is_down && !win_held {
                 let mut st = HOOK_STATE.lock();
