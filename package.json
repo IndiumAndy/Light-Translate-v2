@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "astryx": "astryx",
-    "theme:build": "astryx theme build ./src/main/theme/editorial.ts -o ./src/main/theme/built/editorial.css"
+    "theme:build": "astryx theme build ./src/main/theme/editorial.ts -o ./src/main/theme/built/editorial.css",
+    "install:mac": "bash ./scripts/install-macos.sh"
   },
   "dependencies": {
     "@astryxdesign/core": "^0.7.12",
