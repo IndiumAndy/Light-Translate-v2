@@ -260,6 +260,98 @@ fn shortcut_base_mask(spec: &ShortcutSpec) -> u16 {
     mask
 }
 
+/// X keycode for the physical key named by a recorded shortcut token.
+///
+/// The settings recorder stores `KeyboardEvent.code` (`KeyY` → `Y`), which is
+/// the evdev position, not the symbol the current layout prints. Xorg's evdev
+/// driver numbers those keys as `linux_keycode + 8`.
+fn physical_x_keycode(token: &str) -> Option<u8> {
+    let linux = linux_evdev_key(token)?;
+    u8::try_from(linux.checked_add(8)?).ok()
+}
+
+fn linux_evdev_key(token: &str) -> Option<u16> {
+    if token.len() == 1 {
+        let ch = token.chars().next()?;
+        if ch.is_ascii_uppercase() {
+            return Some(match ch {
+                'A' => 30,
+                'B' => 48,
+                'C' => 46,
+                'D' => 32,
+                'E' => 18,
+                'F' => 33,
+                'G' => 34,
+                'H' => 35,
+                'I' => 23,
+                'J' => 36,
+                'K' => 37,
+                'L' => 38,
+                'M' => 50,
+                'N' => 49,
+                'O' => 24,
+                'P' => 25,
+                'Q' => 16,
+                'R' => 19,
+                'S' => 31,
+                'T' => 20,
+                'U' => 22,
+                'V' => 47,
+                'W' => 17,
+                'X' => 45,
+                'Y' => 21,
+                'Z' => 44,
+                _ => return None,
+            });
+        }
+        if let Some(digit) = ch.to_digit(10) {
+            return Some(if digit == 0 { 11 } else { 1 + digit as u16 });
+        }
+    }
+    if let Some(number) = token
+        .strip_prefix('F')
+        .and_then(|rest| rest.parse::<u16>().ok())
+    {
+        return match number {
+            1..=10 => Some(58 + number),
+            11 => Some(87),
+            12 => Some(88),
+            _ => None,
+        };
+    }
+    Some(match token {
+        "SPACE" => 57,
+        "GRAVE" => 41,
+        "MINUS" => 12,
+        "EQUAL" => 13,
+        "BRACKETLEFT" => 26,
+        "BRACKETRIGHT" => 27,
+        "BACKSLASH" => 43,
+        "SEMICOLON" => 39,
+        "QUOTE" => 40,
+        "COMMA" => 51,
+        "PERIOD" => 52,
+        "SLASH" => 53,
+        _ => return None,
+    })
+}
+
+/// Prefer the physical key when the server actually has that keycode.
+/// Keysym lookup is only the fallback for servers that do not use evdev numbering.
+fn choose_shortcut_keycode(
+    min_keycode: u8,
+    max_keycode: u8,
+    physical: Option<u8>,
+    keysym_code: Option<u8>,
+) -> Option<u8> {
+    if let Some(code) = physical {
+        if code >= min_keycode && code <= max_keycode {
+            return Some(code);
+        }
+    }
+    keysym_code
+}
+
 fn shortcut_keysyms(key: &str) -> Vec<u32> {
     if key.len() == 1 {
         let Some(ch) = key.chars().next() else {
@@ -323,11 +415,22 @@ fn find_keycode(
     None
 }
 
-fn text_from_selection_bytes(bytes: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(bytes)
+fn text_from_selection_bytes(bytes: &[u8], latin1: bool) -> Option<String> {
+    let owned;
+    let text = if latin1 {
+        owned = bytes
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect::<String>();
+        owned.as_str()
+    } else {
+        owned = String::from_utf8_lossy(bytes).into_owned();
+        owned.as_str()
+    };
+    let trimmed = text
         .trim_matches(|ch: char| ch.is_whitespace() || ch == '\0')
         .to_string();
-    (!text.is_empty()).then_some(text)
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 /// Append one INCR chunk. An empty chunk is the ICCCM end marker.
@@ -372,8 +475,14 @@ struct PendingRead {
 }
 
 enum ReadStage {
-    Notify { utf8_done: bool },
-    Incr { buf: Vec<u8>, utf8_done: bool },
+    Notify {
+        utf8_done: bool,
+    },
+    Incr {
+        buf: Vec<u8>,
+        utf8_done: bool,
+        latin1: bool,
+    },
 }
 
 struct X11State {
@@ -421,7 +530,7 @@ impl X11State {
         let string_atom = u32::from(AtomEnum::STRING);
         let incr = intern_atom(&conn, b"INCR")?;
         let prop = intern_atom(&conn, b"LT_SEL_PROP")?;
-        let outputs = load_outputs(&conn, root);
+        let outputs = load_outputs(&conn, root).unwrap_or_default();
         Some(Self {
             conn,
             root,
@@ -452,13 +561,36 @@ impl X11State {
         Some((f64::from(reply.root_x), f64::from(reply.root_y)))
     }
 
-    fn monitor_at(&self, x: f64, y: f64) -> ScreenRect {
+    fn refresh_geometry(&mut self) {
+        if let Ok(cookie) = self.conn.get_geometry(self.root) {
+            if let Ok(geom) = cookie.reply() {
+                self.root_rect =
+                    ScreenRect::new(0.0, 0.0, f64::from(geom.width), f64::from(geom.height));
+            }
+        }
+        if let Some(outputs) = load_outputs(&self.conn, self.root) {
+            self.outputs = outputs;
+        }
+    }
+
+    fn monitor_at(&mut self, x: f64, y: f64) -> ScreenRect {
+        self.refresh_geometry();
         output_containing(&self.outputs, x, y)
             .map(OutputGeom::to_rect)
             .unwrap_or(self.root_rect)
     }
 
     fn keycode_for(&self, spec: &ShortcutSpec) -> Option<u8> {
+        let setup = self.conn.setup();
+        choose_shortcut_keycode(
+            setup.min_keycode,
+            setup.max_keycode,
+            physical_x_keycode(&spec.key),
+            self.keysym_keycode(spec),
+        )
+    }
+
+    fn keysym_keycode(&self, spec: &ShortcutSpec) -> Option<u8> {
         let wanted = shortcut_keysyms(&spec.key);
         let setup = self.conn.setup();
         let min = setup.min_keycode;
@@ -558,14 +690,11 @@ fn intern_atom(conn: &RustConnection, name: &[u8]) -> Option<u32> {
         .map(|reply| reply.atom)
 }
 
-fn load_outputs(conn: &RustConnection, root: u32) -> Vec<OutputGeom> {
+fn load_outputs(conn: &RustConnection, root: u32) -> Option<Vec<OutputGeom>> {
     let resources = conn
         .randr_get_screen_resources_current(root)
         .ok()
-        .and_then(|cookie| cookie.reply().ok());
-    let Some(resources) = resources else {
-        return Vec::new();
-    };
+        .and_then(|cookie| cookie.reply().ok())?;
     let mut outputs = Vec::new();
     for crtc in resources.crtcs {
         let Ok(cookie) = conn.randr_get_crtc_info(crtc, resources.config_timestamp) else {
@@ -584,7 +713,7 @@ fn load_outputs(conn: &RustConnection, root: u32) -> Vec<OutputGeom> {
             height: u32::from(info.height),
         });
     }
-    outputs
+    Some(outputs)
 }
 
 struct X11Worker {
@@ -598,6 +727,7 @@ struct X11Worker {
     shortcut: Option<ShortcutSpec>,
     grabs_enabled: bool,
     last_shortcut_at: Instant,
+    last_pointer_sample: Instant,
 }
 
 impl X11Worker {
@@ -626,6 +756,7 @@ impl X11Worker {
                 break;
             }
             self.expire_pending();
+            self.emit_pointer_sample();
         }
         if let Some(state) = self.state.as_ref() {
             state.clear_grabs(&self.grabbed);
@@ -669,7 +800,7 @@ impl X11Worker {
                 let _ = reply.send(point);
             }
             X11Cmd::MonitorAt { x, y, reply } => {
-                let rect = self.state.as_ref().map(|state| state.monitor_at(x, y));
+                let rect = self.state.as_mut().map(|state| state.monitor_at(x, y));
                 let _ = reply.send(rect);
             }
             X11Cmd::SetGrab { spec, enabled } => {
@@ -782,6 +913,7 @@ impl X11Worker {
             return;
         }
         let incr_atom = self.state.as_ref().map(|state| state.incr);
+        let string_atom = self.state.as_ref().map(|state| state.string_atom);
         let property_body = self.state.as_ref().and_then(X11State::take_property);
         let Some((type_atom, data)) = property_body else {
             self.finish_or_fallback(None);
@@ -797,12 +929,14 @@ impl X11Worker {
                 pending.stage = ReadStage::Incr {
                     buf: Vec::new(),
                     utf8_done,
+                    latin1: false,
                 };
                 pending.deadline = Instant::now() + SELECTION_INCR_WAIT;
             }
             return;
         }
-        self.finish_or_fallback(text_from_selection_bytes(&data));
+        let latin1 = Some(type_atom) == string_atom;
+        self.finish_or_fallback(text_from_selection_bytes(&data, latin1));
     }
 
     fn on_incr_chunk(&mut self) {
@@ -817,6 +951,7 @@ impl X11Worker {
             return;
         }
         let incr_atom = self.state.as_ref().map(|state| state.incr);
+        let string_atom = self.state.as_ref().map(|state| state.string_atom);
         let property_body = self.state.as_ref().and_then(X11State::take_property);
         let Some((type_atom, data)) = property_body else {
             return;
@@ -824,12 +959,16 @@ impl X11Worker {
         if Some(type_atom) == incr_atom {
             return;
         }
+        let chunk_is_latin1 = Some(type_atom) == string_atom;
         let finished = match self.pending.as_mut() {
             Some(PendingRead {
-                stage: ReadStage::Incr { buf, .. },
+                stage: ReadStage::Incr { buf, latin1, .. },
                 deadline,
                 ..
             }) => {
+                if chunk_is_latin1 {
+                    *latin1 = true;
+                }
                 let done = push_incr_chunk(buf, &data);
                 if !done {
                     *deadline = Instant::now() + SELECTION_INCR_WAIT;
@@ -843,7 +982,7 @@ impl X11Worker {
                 .pending
                 .as_ref()
                 .and_then(|pending| match &pending.stage {
-                    ReadStage::Incr { buf, .. } => text_from_selection_bytes(buf),
+                    ReadStage::Incr { buf, latin1, .. } => text_from_selection_bytes(buf, *latin1),
                     ReadStage::Notify { .. } => None,
                 });
             self.finish_or_fallback(text);
@@ -880,6 +1019,25 @@ impl X11Worker {
         self.pump_queue();
     }
 
+    fn emit_pointer_sample(&mut self) {
+        if self.last_pointer_sample.elapsed() < Duration::from_millis(50) {
+            return;
+        }
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let Some((x, y)) = state.query_pointer() else {
+            return;
+        };
+        self.last_pointer_sample = Instant::now();
+        let scale = positive_scale(self.scale.lock().value);
+        let pointer = ScreenPoint::new(x / scale, y / scale);
+        let callback = self.callback.lock().clone();
+        if let Some(callback) = callback {
+            callback(crate::platform::PlatformInputEvent::PointerMoved { pointer });
+        }
+    }
+
     fn expire_pending(&mut self) {
         let expired = self
             .pending
@@ -892,7 +1050,9 @@ impl X11Worker {
             .pending
             .as_ref()
             .and_then(|pending| match &pending.stage {
-                ReadStage::Incr { buf, .. } if !buf.is_empty() => text_from_selection_bytes(buf),
+                ReadStage::Incr { buf, latin1, .. } if !buf.is_empty() => {
+                    text_from_selection_bytes(buf, *latin1)
+                }
                 _ => None,
             });
         self.finish_or_fallback(partial);
@@ -943,6 +1103,7 @@ impl X11Client {
             shortcut: None,
             grabs_enabled: false,
             last_shortcut_at: Instant::now() - SHORTCUT_REPEAT_GAP,
+            last_pointer_sample: Instant::now() - Duration::from_millis(50),
         };
         thread::Builder::new()
             .name("lt-x11".into())
@@ -1347,10 +1508,28 @@ mod tests {
         assert!(!push_incr_chunk(&mut buffer, b"translate"));
         assert!(push_incr_chunk(&mut buffer, b""));
         assert_eq!(
-            text_from_selection_bytes(&buffer).as_deref(),
+            text_from_selection_bytes(&buffer, false).as_deref(),
             Some("light-translate")
         );
-        assert_eq!(text_from_selection_bytes(b"   \0  "), None);
+        assert_eq!(text_from_selection_bytes(b"   \0  ", false), None);
+        assert_eq!(
+            text_from_selection_bytes(&[b'c', b'a', b'f', 0xe9], true).as_deref(),
+            Some("café")
+        );
+    }
+
+    #[test]
+    fn recorded_shortcut_uses_the_physical_evdev_key() {
+        assert_eq!(physical_x_keycode("T"), Some(28));
+        assert_eq!(physical_x_keycode("Y"), Some(29));
+        assert_eq!(physical_x_keycode("A"), Some(38));
+        assert_eq!(physical_x_keycode("F4"), Some(70));
+        // QWERTZ: the recorded physical Y must win over the keysym that currently prints Y.
+        assert_eq!(
+            choose_shortcut_keycode(8, 255, Some(29), Some(52)),
+            Some(29)
+        );
+        assert_eq!(choose_shortcut_keycode(8, 20, None, Some(12)), Some(12));
     }
 
     #[test]
