@@ -1,6 +1,6 @@
 # Light Translate 2.1
 
-基于 **Rust + Tauri v2 + React 19 (TypeScript) + Meta Astryx** 的桌面轻量取词与即时翻译工具。**macOS 与 Windows 是主要目标平台**；Linux（仅 X11）提供主窗口词典、手动翻译与生词本的有限兼容支持（差异说明见文末）。
+基于 **Rust + Tauri v2 + React 19 (TypeScript) + Meta Astryx** 的桌面轻量取词与即时翻译工具。**macOS 与 Windows 是主要目标平台**；Linux 提供主窗口词典、手动翻译、生词本，以及在 **原生 X11** 上翻译当前 PRIMARY 选区（差异说明见文末）。
 
 ---
 
@@ -33,8 +33,8 @@
 2. 双击运行安装程序；若弹出 Windows SmartScreen 提示，点击 **「更多信息」→「仍要运行」**，按简体中文向导完成安装。
 3. 启动后在「设置 → 翻译引擎」填入 API Key（如 Gemini / DeepSeek / OpenAI 兼容接口）即可直接使用悬停取词、划词翻译与截屏 OCR。
 
-### 3. Linux (X11) 安装步骤
-请确保桌面会话处于 **X11**（暂不支持纯 Wayland 全局特性），按发行版三选一安装：
+### 3. Linux 安装步骤
+主窗口在 X11 与 Wayland 下都能打开。**翻译当前选区**和全局快捷键只在 **原生 X11** 会话里可用；纯 Wayland 请把文字粘贴进主窗口手动翻译。XWayland 只能读到 X11 应用里的选区。按发行版三选一安装：
 
 - **Ubuntu / Debian 系（`.deb`）**：
   ```bash
@@ -114,10 +114,21 @@ export CARGO_TARGET_DIR="$HOME/Library/Caches/LightTranslateV2/target"
 - **划词翻译**：macOS `⌥⌘T`（`Alt+Command+T`），Windows `Alt+Shift+T`
 - **区域截屏**：macOS `⌃⌘S`（`Control+Command+S`），Windows `Alt+Shift+S`
 
-### Linux（仅 X11 有限兼容）
+### Linux
 
-主窗口内的手动翻译、离线词典查询、阅读统计、设置与生词本导入导出均可正常编译与使用；但 `src-tauri/src/platform/linux.rs` 暂未实现以下桌面级全局能力：
+主窗口内的手动翻译、离线词典、阅读统计、设置与生词本导入导出可以正常使用。另外，在 **原生 X11** 上可以翻译当前 PRIMARY 选区：
 
-- 无全局键鼠钩子（悬停取词、双击修饰键与全局快捷键不会触发）。
-- 无无障碍树取词与本地离线 OCR（仅支持读取已有 X11 PRIMARY 选区文本）。
-- 剪贴板写入返回 `NotSupported`，浮窗为普通窗口（无点击穿透与免激活特性），且不支持 Wayland。
+- 托盘菜单「翻译当前选区」
+- 翻译页按钮「翻译当前选区」
+- 全局快捷键（默认 `Alt+Shift+T`，可在设置里改）。快捷键用 `XGrabKey` 注册，并带上 CapsLock / NumLock 的修饰组合。XWayland 与纯 Wayland **不**注册快捷键，因为抓不到原生 Wayland 窗口的按键。
+
+明确不做、界面上会标成「不支持」的能力：
+
+- 悬停取词、双击修饰键、修饰键唤起。Linux 不安装全局键鼠钩子。
+- 区域截屏 OCR。没有本地 OCR，托盘里也不再提供这一项；若仍从别处触发，会提示不支持，而不会先截一整屏再丢掉。
+- 忽略应用列表。读不到前台应用名称，列表不会生效。
+- 辅助功能 / 屏幕录制权限。Linux 没有对应的系统授权，状态不会因为设置了 `DISPLAY` 就显示为已开启。XWayland 同样如此。
+
+剪贴板复制（浮窗与翻译页的复制按钮）在有 X11 的会话里写入系统剪贴板。浮窗仍是普通窗口，没有点击穿透，也不会避免抢走焦点。
+
+**Wayland：** 应用可以打开，词典和手动翻译可用。纯 Wayland 读不到选区，界面和这里都会说明。XWayland 下，PRIMARY 与复制只对仍走 X11 的应用有效。

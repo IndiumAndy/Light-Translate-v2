@@ -31,6 +31,23 @@ export function triggerModifierLabel(
   }
 }
 
+export type LinuxSessionKind = "x11" | "xwayland" | "wayland" | "headless";
+
+export function linuxSessionKind(platform: string | undefined): LinuxSessionKind | null {
+  switch (platform) {
+    case "linux":
+      return "x11";
+    case "linux-xwayland":
+      return "xwayland";
+    case "linux-wayland":
+      return "wayland";
+    case "linux-headless":
+      return "headless";
+    default:
+      return null;
+  }
+}
+
 export function triggerModifierKbdKeys(mod: TriggerModifier | undefined): string {
   switch (mod) {
     case "control":

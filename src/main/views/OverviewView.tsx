@@ -27,6 +27,7 @@ import {
   toAstryxKbdKeys,
   triggerModifierKbdKeys,
   triggerModifierLabel,
+  type LinuxSessionKind,
 } from "../shortcuts";
 
 export type SettingsPane = "interaction" | "engine" | "system";
@@ -83,6 +84,8 @@ export interface OverviewViewProps {
   usageStats: UsageStatsSummary | null;
   entries: SavedEntry[];
   isMac: boolean;
+  isLinux: boolean;
+  linuxSession: LinuxSessionKind | null;
   defaultCaptureShortcut: string;
   onNavigateTranslate: () => void;
   onNavigateWordbook: () => void;
@@ -94,6 +97,8 @@ export function OverviewView({
   usageStats,
   entries,
   isMac,
+  isLinux,
+  linuxSession,
   defaultCaptureShortcut,
   onNavigateTranslate,
   onNavigateWordbook,
@@ -177,8 +182,17 @@ export function OverviewView({
   }, [usageStats]);
 
   const captureKbd = toAstryxKbdKeys(settings?.captureShortcut ?? defaultCaptureShortcut);
+  const selectionKbd = toAstryxKbdKeys(settings?.selectionShortcut ?? "");
   const hoverModKbd = triggerModifierKbdKeys(settings?.triggerModifier);
   const hoverModText = triggerModifierLabel(settings?.triggerModifier, isMac);
+  const session = linuxSession;
+  const selectionDescription = !isLinux
+    ? ""
+    : session === "xwayland"
+      ? "只能读到 X11 应用里的选中文字"
+      : session === "wayland" || session === "headless"
+        ? "当前会话读不到选区，请手动粘贴"
+        : "选中文字后用快捷键、托盘或翻译页";
 
   const cellGapCls = "gap-[2.5px]";
   const cellRadiusCls = "rounded-[2px]";
@@ -538,48 +552,81 @@ export function OverviewView({
                   <Divider />
 
                   <List edge="flush" density="compact" hasDividers>
-                    <ListItem
-                      className="min-h-[50px]"
-                      label="单词取词"
-                      description="未选中文本时点按或按住修饰键"
-                      endContent={
-                        settings?.triggerModifier === "leftOption" ||
-                        settings?.triggerModifier === "rightOption" ? (
-                          <Text type="supporting" weight="medium">
-                            {hoverModText}
-                          </Text>
-                        ) : (
-                          <Kbd keys={hoverModKbd} />
-                        )
-                      }
-                    />
-                    <ListItem
-                      className="min-h-[50px]"
-                      label="划线翻译"
-                      description="选中文本后点按修饰键直接翻译"
-                      endContent={
-                        settings?.triggerModifier === "leftOption" ||
-                        settings?.triggerModifier === "rightOption" ? (
-                          <Text type="supporting" weight="medium">
-                            {hoverModText}
-                          </Text>
-                        ) : (
-                          <Kbd keys={hoverModKbd} />
-                        )
-                      }
-                    />
-                    <ListItem
-                      className="min-h-[50px]"
-                      label="区域截屏"
-                      description="框选屏幕区域识别并翻译"
-                      endContent={
-                        captureKbd ? (
-                          <Kbd keys={captureKbd} />
-                        ) : (
-                          <Text type="supporting">未绑定</Text>
-                        )
-                      }
-                    />
+                    {isLinux ? (
+                      <>
+                        <ListItem
+                          className="min-h-[50px]"
+                          label="选区翻译"
+                          description={selectionDescription}
+                          endContent={
+                            session === "x11" && selectionKbd ? (
+                              <Kbd keys={selectionKbd} />
+                            ) : session === "wayland" || session === "headless" ? (
+                              <Text type="supporting">不可用</Text>
+                            ) : (
+                              <Text type="supporting">托盘 / 按钮</Text>
+                            )
+                          }
+                        />
+                        <ListItem
+                          className="min-h-[50px]"
+                          label="悬停取词"
+                          description="Linux 不监听全局鼠标与修饰键"
+                          endContent={<Text type="supporting">不支持</Text>}
+                        />
+                        <ListItem
+                          className="min-h-[50px]"
+                          label="区域截屏"
+                          description="Linux 不提供区域 OCR"
+                          endContent={<Text type="supporting">不支持</Text>}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <ListItem
+                          className="min-h-[50px]"
+                          label="单词取词"
+                          description="未选中文本时点按或按住修饰键"
+                          endContent={
+                            settings?.triggerModifier === "leftOption" ||
+                            settings?.triggerModifier === "rightOption" ? (
+                              <Text type="supporting" weight="medium">
+                                {hoverModText}
+                              </Text>
+                            ) : (
+                              <Kbd keys={hoverModKbd} />
+                            )
+                          }
+                        />
+                        <ListItem
+                          className="min-h-[50px]"
+                          label="划线翻译"
+                          description="选中文本后点按修饰键直接翻译"
+                          endContent={
+                            settings?.triggerModifier === "leftOption" ||
+                            settings?.triggerModifier === "rightOption" ? (
+                              <Text type="supporting" weight="medium">
+                                {hoverModText}
+                              </Text>
+                            ) : (
+                              <Kbd keys={hoverModKbd} />
+                            )
+                          }
+                        />
+                        <ListItem
+                          className="min-h-[50px]"
+                          label="区域截屏"
+                          description="框选屏幕区域识别并翻译"
+                          endContent={
+                            captureKbd ? (
+                              <Kbd keys={captureKbd} />
+                            ) : (
+                              <Text type="supporting">未绑定</Text>
+                            )
+                          }
+                        />
+                      </>
+                    )}
                   </List>
                 </VStack>
               </section>

@@ -32,6 +32,7 @@ import type {
   WordEntry,
 } from "../shared/types";
 import { appBridge, safeListen } from "./bridge";
+import { linuxSessionKind } from "./shortcuts";
 import { editorialTheme } from "./theme/built/editorial";
 import { OverviewView, type SettingsPane } from "./views/OverviewView";
 import { SettingsView } from "./views/SettingsView";
@@ -77,6 +78,14 @@ function MainWorkspace() {
   const isMac =
     permissions?.platform === "macos" ||
     (typeof navigator !== "undefined" && navigator.userAgent.includes("Mac"));
+  const platformId = permissions?.platform ?? "";
+  const isLinux =
+    platformId.startsWith("linux") ||
+    (platformId === "" &&
+      typeof navigator !== "undefined" &&
+      /Linux/i.test(navigator.userAgent) &&
+      !isMac);
+  const linuxSession = linuxSessionKind(permissions?.platform);
   const defaultCaptureShortcut = isMac ? "Control+Command+S" : "Alt+Shift+S";
   const defaultSelectionShortcut = isMac ? "Alt+Command+T" : "Alt+Shift+T";
 
@@ -216,6 +225,10 @@ function MainWorkspace() {
     }
   }, [inputText, manualMode]);
 
+  const translateCurrentSelection = useCallback(async () => {
+    await appBridge.translateCurrentSelection();
+  }, []);
+
   const clearManualTranslate = useCallback(() => {
     activeReqId.current = "";
     setInputText("");
@@ -269,14 +282,26 @@ function MainWorkspace() {
                     <Tooltip
                       placement="below"
                       content={
-                        settings.enabled
-                          ? "全局取词运行中（点击暂停）"
-                          : "全局取词已暂停（点击开启）"
+                        isLinux
+                          ? settings.enabled
+                            ? "选区翻译已启用（点击暂停）"
+                            : "选区翻译已暂停（点击开启）"
+                          : settings.enabled
+                            ? "全局取词运行中（点击暂停）"
+                            : "全局取词已暂停（点击开启）"
                       }
                     >
                       <button
                         type="button"
-                        aria-label={settings.enabled ? "暂停全局取词" : "开启全局取词"}
+                        aria-label={
+                          isLinux
+                            ? settings.enabled
+                              ? "暂停选区翻译"
+                              : "开启选区翻译"
+                            : settings.enabled
+                              ? "暂停全局取词"
+                              : "开启全局取词"
+                        }
                         aria-pressed={settings.enabled}
                         onClick={() =>
                           persistSettings({ ...settings, enabled: !settings.enabled })
@@ -285,7 +310,15 @@ function MainWorkspace() {
                       >
                         <StatusDot
                           variant={settings.enabled ? "success" : "neutral"}
-                          label={settings.enabled ? "全局取词运行中" : "全局取词已暂停"}
+                          label={
+                            isLinux
+                              ? settings.enabled
+                                ? "选区翻译已启用"
+                                : "选区翻译已暂停"
+                              : settings.enabled
+                                ? "全局取词运行中"
+                                : "全局取词已暂停"
+                          }
                         />
                       </button>
                     </Tooltip>
@@ -352,6 +385,8 @@ function MainWorkspace() {
               usageStats={usageStats}
               entries={entries}
               isMac={isMac}
+              isLinux={isLinux}
+              linuxSession={linuxSession}
               defaultCaptureShortcut={defaultCaptureShortcut}
               onNavigateTranslate={() => setTab("translate")}
               onNavigateWordbook={() => setTab("wordbook")}
@@ -380,6 +415,9 @@ function MainWorkspace() {
               onRunTranslate={runManualTranslate}
               onClearTranslate={clearManualTranslate}
               onSavedEntry={refreshEntries}
+              isLinux={isLinux}
+              linuxSession={linuxSession}
+              onTranslateSelection={translateCurrentSelection}
             />
           )}
 
@@ -397,6 +435,8 @@ function MainWorkspace() {
               permissions={permissions}
               keyStatus={keyStatus}
               isMac={isMac}
+              isLinux={isLinux}
+              linuxSession={linuxSession}
               defaultCaptureShortcut={defaultCaptureShortcut}
               defaultSelectionShortcut={defaultSelectionShortcut}
               pane={settingsPane}
