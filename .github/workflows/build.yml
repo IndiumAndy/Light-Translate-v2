@@ -21,8 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  # Signing runs share one queue. Other builds stay on their own ref and are not cancelled.
-  group: ${{ ((github.event_name == 'workflow_dispatch' && inputs.sign_macos) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && 'apple-notarization' || format('build-{0}-{1}', github.workflow, github.ref) }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -69,7 +68,7 @@ jobs:
   build-bundles:
     name: Build (${{ matrix.os_label }})
     needs: test-core
-    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new) || (github.event_name == 'workflow_dispatch' && inputs.sign_macos && matrix.os_label != 'macos')) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new) }}
     strategy:
       fail-fast: false
       matrix:

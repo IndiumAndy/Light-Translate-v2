@@ -25,7 +25,7 @@ Apple 账号如有待接受的新开发者协议，须由账号持有人先处�
 2. 合并并通过常规 CI 后，在该提交上推送对应的 `v<版本号>` 标签。
 3. 标签触发正式构建；普通分支与 PR 仅构建测试包，不接触签名凭据，也不创建公开 Release。
 
-发布前用「Query macOS notarization」查询已经交给 Apple 的 submission ID。该工作流不编译、不上传、不发布。要对一份新的二进制签名并公证，需同时勾选 `sign_macos` 和 `submit_new`；只勾选 `sign_macos` 不会构建或上传。手动流程不会创建公开 Release。
+发布前用「Query macOS notarization」查询已经交给 Apple 的 submission ID。该工作流不编译、不上传、不发布。要对一份新的二进制签名并公证，需同时勾选 `sign_macos` 和 `submit_new`；只勾选 `sign_macos` 不会构建或上传。勾选 `submit_new` 时其他平台仍会构建，但不会公证。手动流程不会创建公开 Release。
 
 macOS CI 使用临时钥匙串导入证书，由 Tauri 生成双架构应用并签名、启用 hardened runtime。Tauri 拿不到公证凭据。发布脚本对应用归档只上传一次，保存提交编号并查询结果；确认 Apple 接受后装订并验证应用票据。随后用系统 `hdiutil` 将已装订的应用和「应用程序」文件夹链接打包为 DMG，对 DMG 签名，再对 DMG 只上传一次并装订票据。构建结束会删除临时钥匙串。
 

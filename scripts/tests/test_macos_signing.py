@@ -226,6 +226,10 @@ class SigningSafeguards(unittest.TestCase):
         submit_block = build.split("submit_new:", 1)[1].split("permissions:", 1)[0]
         self.assertIn("default: false", submit_block)
         self.assertIn("inputs.submit_new", build)
+        job_if = build.split("build-bundles:", 1)[1].split("strategy:", 1)[0]
+        condition = [line for line in job_if.splitlines() if line.strip().startswith("if:")]
+        self.assertEqual(len(condition), 1)
+        self.assertNotIn("matrix.", condition[0])
 
     def test_local_installer_does_not_fall_back_to_adhoc(self):
         self.env["APPLE_SIGNING_IDENTITY"] = "-"
