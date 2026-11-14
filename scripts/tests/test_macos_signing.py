@@ -234,6 +234,10 @@ class SigningSafeguards(unittest.TestCase):
         condition = [line for line in job_if.splitlines() if line.strip().startswith("if:")]
         self.assertEqual(len(condition), 1)
         self.assertNotIn("matrix.", condition[0])
+        verify = build.split("verify-preserved-dmg:", 1)[1].split("test-core:", 1)[0]
+        self.assertIn("3b9af383eeddde4718820c315a0adbf12c4c123b3f4b44b8bbeee92488351c79", verify)
+        self.assertNotIn("notarytool", verify)
+        self.assertNotIn("tauri build", verify)
 
     def test_local_installer_does_not_fall_back_to_adhoc(self):
         self.env["APPLE_SIGNING_IDENTITY"] = "-"

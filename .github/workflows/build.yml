@@ -20,6 +20,10 @@ on:
         description: Comma-separated Apple submission IDs to query. Used only when submit_new is false.
         type: string
         default: "6f3e89b3-a007-488a-8169-934e4538ff3c,fead72bc-32cd-448d-b2b6-b10d8aa4ec98,50da0ca2-671e-4892-918b-afc1aff406b2,3b568336-28a8-47d3-9f03-163bfa12d74e,1d0948ba-9674-46fd-8b9d-6ae23104b59e"
+      verify_recovery_artifact:
+        description: Verify preserved DMG macos-notarization-recovery-43576209022-1 only. Does not build or upload.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,8 +33,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-preserved-dmg:
+    name: Verify preserved notarized DMG
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_recovery_artifact
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the exact recovered DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-notarization-recovery-43576209022-1
+          run-id: 43576209022
+          github-token: ${{ github.token }}
+          path: recovered
+      - name: Check signature, architectures, ticket, and Gatekeeper
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          EXPECTED_SHA256: 3b9af383eeddde4718820c315a0adbf12c4c123b3f4b44b8bbeee92488351c79
+        run: |
+          set -euo pipefail
+          dmg="$(find recovered -type f -name 'Light Translate_2.1.1_universal.dmg' -print -quit)"
+          test -n "$dmg"
+          actual="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          test "$actual" = "$EXPECTED_SHA256"
+          echo "DMG sha256 before verification: $actual"
+          bash scripts/verify-macos-release.sh "$dmg" "$APPLE_TEAM_ID"
+          after="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          test "$after" = "$EXPECTED_SHA256"
+          echo "DMG sha256 unchanged: $after"
+
   test-core:
     name: Rust Core Tests & Frontend Typecheck
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.verify_recovery_artifact) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +98,7 @@ jobs:
   query-saved-notary:
     name: Query saved Apple submissions
     needs: test-core
-    if: github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new
+    if: github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new && !inputs.verify_recovery_artifact
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -77,7 +115,7 @@ jobs:
   build-bundles:
     name: Build (${{ matrix.os_label }})
     needs: test-core
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.verify_recovery_artifact || (inputs.sign_macos && !inputs.submit_new))) }}
     strategy:
       fail-fast: false
       matrix:
