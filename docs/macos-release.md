@@ -31,6 +31,8 @@ macOS CI 使用临时钥匙串导入证书，由 Tauri 对应用签名、启用 
 
 发布前 `scripts/verify-macos-release.sh` 检查 DMG 和只读挂载后的应用：有效的 Apple Developer ID 证书链、指定团队、固定 bundle ID、不包含 cdhash 的 designated requirement、Intel/Apple Silicon 双架构、各架构的 hardened runtime 和可信时间戳、两层公证票据及 Gatekeeper 接受结果。任一步失败都会阻止发布。已存在的 Release 不覆盖，需使用新版本号。
 
+首次公证可能等待较久。DMG 公证默认最多等待两小时，可通过 `LT_NOTARY_TIMEOUT` 调整。超时会记录 Apple submission ID 并阻止发布；CI 另外保留签名 DMG 七天用于恢复验收，这类 `macos-notarization-recovery-*` artifact 不会被公开 Release 收集。队列超时或网络请求超时可以重试失败的 job；必须等 Apple 接受并完成验收后才能发布。
+
 也可在 Mac 上对实际下载的文件独立验收：
 
 ```bash

@@ -38,6 +38,9 @@ if name == 'codesign':
             print('Timestamp=Nov 13, 2026')
 elif name == 'xcrun':
     if args[:2] == ['notarytool', 'submit']:
+        if failure == 'notary-timeout':
+            print(json.dumps({'message': 'Processing timeout', 'id': 'test-request'}))
+            sys.exit(1)
         print(json.dumps({'status': 'Invalid' if failure == 'notary' else 'Accepted', 'id': 'test-request'}))
     elif args[:2] == ['stapler', 'validate'] and failure == 'ticket':
         sys.exit(1)
@@ -134,6 +137,15 @@ class SigningSafeguards(unittest.TestCase):
         result = self.run_script("notarize-macos-dmg.sh", self.dmg)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(any(c[:3] == ["xcrun", "stapler", "staple"] for c in self.calls()))
+
+    def test_timeout_preserves_request_id_and_never_staples(self):
+        self.env["FAIL_CHECK"] = "notary-timeout"
+        result = self.run_script("notarize-macos-dmg.sh", self.dmg)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test-request", result.stderr)
+        self.assertFalse(any(c[:2] == ["xcrun", "stapler"] for c in self.calls()))
+        submit = next(c for c in self.calls() if c[:3] == ["xcrun", "notarytool", "submit"])
+        self.assertEqual(submit[submit.index("--timeout") + 1], "2h")
 
     def test_ci_keychain_setup_does_not_run_on_developers_machine(self):
         self.env.pop("GITHUB_ACTIONS", None)
