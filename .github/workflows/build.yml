@@ -16,6 +16,10 @@ on:
         description: Upload one new Apple submission. Leave false to avoid another upload.
         type: boolean
         default: false
+      submission_ids:
+        description: Comma-separated Apple submission IDs to query. Used only when submit_new is false.
+        type: string
+        default: "6f3e89b3-a007-488a-8169-934e4538ff3c,fead72bc-32cd-448d-b2b6-b10d8aa4ec98,50da0ca2-671e-4892-918b-afc1aff406b2,3b568336-28a8-47d3-9f03-163bfa12d74e,1d0948ba-9674-46fd-8b9d-6ae23104b59e"
 
 permissions:
   contents: read
@@ -53,17 +57,22 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-  refuse-unconfirmed-notary-upload:
-    name: Refuse unconfirmed Apple upload
+  query-saved-notary:
+    name: Query saved Apple submissions
     needs: test-core
     if: github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
+    timeout-minutes: 20
     steps:
-      - name: Do not build or upload
-        run: |
-          echo "NOTARY_STATUS action=refused-new-upload"
-          echo "sign_macos was set without submit_new. No binary was built and nothing was sent to Apple."
-          echo "Query the saved submission IDs with the Query macOS notarization workflow."
+      - uses: actions/checkout@v4
+      - name: Read notarization status without uploading
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_QUERY_IDS: ${{ inputs.submission_ids }}
+          LT_NOTARY_MAX_POLLS: "1"
+        run: python3 scripts/notarize_macos.py --query-only
 
   build-bundles:
     name: Build (${{ matrix.os_label }})
