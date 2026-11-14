@@ -38,8 +38,10 @@ if name == 'codesign':
             print('Timestamp=Nov 13, 2026')
 elif name == 'xcrun':
     if args[:2] == ['notarytool', 'submit']:
+        print(json.dumps({'id': 'test-request'}))
+    elif args[:2] == ['notarytool', 'info']:
         if failure == 'notary-timeout':
-            print(json.dumps({'message': 'Processing timeout', 'id': 'test-request'}))
+            print('Network timeout', file=sys.stderr)
             sys.exit(1)
         print(json.dumps({'status': 'Invalid' if failure == 'notary' else 'Accepted', 'id': 'test-request'}))
     elif args[:2] == ['stapler', 'validate'] and failure == 'ticket':
@@ -49,8 +51,11 @@ elif name == 'spctl' and failure == 'gatekeeper':
 elif name == 'lipo' and failure == 'architecture':
     sys.exit(1)
 elif name == 'hdiutil':
-    if args[0] == 'attach':
+    if args[0] == 'create':
+        pathlib.Path(args[-1]).touch()
+    elif args[0] == 'attach':
         mount = pathlib.Path(args[args.index('-mountpoint') + 1])
+        (mount / 'Applications').symlink_to('/Applications')
         if failure != 'missing-app':
             contents = mount / 'Light Translate.app' / 'Contents'
             (contents / 'MacOS').mkdir(parents=True)
@@ -59,7 +64,17 @@ elif name == 'hdiutil':
                 plistlib.dump({'CFBundleIdentifier': 'wrong.bundle' if failure == 'bundle' else 'com.atat.lighttranslate.v2'}, stream)
     elif args[0] == 'detach':
         for child in pathlib.Path(args[1]).iterdir():
-            shutil.rmtree(child) if child.is_dir() else child.unlink()
+            shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+elif name == 'pnpm':
+    if any(os.environ.get(key) for key in ('APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID')):
+        sys.exit('Build must not start Tauri notarization')
+    app = pathlib.Path(os.environ['CARGO_TARGET_DIR']) / 'universal-apple-darwin/release/bundle/macos/Light Translate.app'
+    app.mkdir(parents=True)
+elif name == 'ditto':
+    if '-c' in args:
+        pathlib.Path(args[-1]).write_bytes(b'signed-app-archive')
+    else:
+        shutil.copytree(args[-2], args[-1])
 '''
 
 
@@ -73,13 +88,14 @@ class SigningSafeguards(unittest.TestCase):
         fake = self.bin / "fake-tool"
         fake.write_text(FAKE_TOOL)
         fake.chmod(0o755)
-        for command in ("codesign", "xcrun", "spctl", "lipo", "hdiutil", "security", "pnpm"):
+        for command in ("codesign", "xcrun", "spctl", "lipo", "hdiutil", "security", "pnpm", "ditto"):
             (self.bin / command).symlink_to(fake)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("APPLE_")}
         self.env.update(CREDENTIALS)
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env['PATH']}"
         self.log = self.base / "tools.jsonl"
         self.env["TOOL_LOG"] = str(self.log)
+        self.env["LT_NOTARY_POLL_SECONDS"] = "0.01"
         self.dmg = self.base / "Light Translate.dmg"
         self.dmg.touch()
 
@@ -140,12 +156,35 @@ class SigningSafeguards(unittest.TestCase):
 
     def test_timeout_preserves_request_id_and_never_staples(self):
         self.env["FAIL_CHECK"] = "notary-timeout"
+        self.env["LT_NOTARY_TIMEOUT"] = "1s"
         result = self.run_script("notarize-macos-dmg.sh", self.dmg)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("test-request", result.stderr)
         self.assertFalse(any(c[:2] == ["xcrun", "stapler"] for c in self.calls()))
-        submit = next(c for c in self.calls() if c[:3] == ["xcrun", "notarytool", "submit"])
-        self.assertEqual(submit[submit.index("--timeout") + 1], "2h")
+        submits = [c for c in self.calls() if c[:3] == ["xcrun", "notarytool", "submit"]]
+        self.assertEqual(len(submits), 1)
+        self.assertNotIn("--wait", submits[0])
+        self.assertEqual(json.loads(Path(str(self.dmg) + ".notarization.json").read_text())["id"], "test-request")
+
+    def test_release_packages_the_stapled_app_before_notarizing_dmg(self):
+        self.env["CARGO_TARGET_DIR"] = str(self.base / "target")
+        result = self.run_script("build-macos-release.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        submitted = [c for c in calls if c[:3] == ["xcrun", "notarytool", "submit"]]
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(submitted[0][3].endswith(".zip"))
+        staple_index = next(i for i, c in enumerate(calls) if c[:3] == ["xcrun", "stapler", "staple"])
+        image_index = next(i for i, c in enumerate(calls) if c[:2] == ["hdiutil", "create"])
+        self.assertLess(staple_index, image_index)
+        self.assertTrue(any(c[0] == "codesign" and c[-1].endswith(".dmg") for c in calls[image_index:]))
+
+    def test_rejected_app_never_becomes_an_installer(self):
+        self.env["CARGO_TARGET_DIR"] = str(self.base / "target")
+        self.env["FAIL_CHECK"] = "notary"
+        result = self.run_script("build-macos-release.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(c[:2] == ["hdiutil", "create"] for c in self.calls()))
 
     def test_ci_keychain_setup_does_not_run_on_developers_machine(self):
         self.env.pop("GITHUB_ACTIONS", None)

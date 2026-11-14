@@ -120,7 +120,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        run: pnpm tauri build ${{ matrix.tauri_args }}
+        run: bash scripts/build-macos-release.sh
 
       - name: Notarize and verify the downloadable macOS installer
         if: env.SIGN_MACOS == 'true'
@@ -186,8 +186,12 @@ jobs:
         if: failure() && env.SIGN_MACOS == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: macos-notarization-recovery-${{ github.run_id }}
-          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          name: macos-notarization-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.notarization.json
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.zip
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.notarization.json
           if-no-files-found: warn
           retention-days: 7
 
