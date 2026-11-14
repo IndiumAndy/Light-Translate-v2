@@ -1,6 +1,6 @@
 [package]
 name = "light-translate-v2"
-version = "2.1.0"
+version = "2.1.1"
 description = "Cross-platform lightweight hover, selection, and region OCR translator"
 authors = ["Light Translate Contributors"]
 edition = "2021"

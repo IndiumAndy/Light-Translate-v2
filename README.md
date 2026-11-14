@@ -22,11 +22,10 @@
 ### 1. macOS 安装步骤
 1. 下载 **`LightTranslate-macOS-Universal.dmg`**（请勿下载 `.exe` / `.msi` / `.deb`）。
 2. 双击打开 `.dmg`，将 **Light Translate.app** 拖入右侧 **Applications（应用程序）** 文件夹。
-3. **首次打开提示处理**：由于无焦点取词浮窗使用了 macOS 原生面板私有能力（未上架 App Store），首次打开若提示“无法验证开发者”或“已损坏”，在终端执行以下命令即可放行：
-   ```bash
-   xattr -cr "/Applications/Light Translate.app"
-   ```
+3. 从 v2.1.1 起，正式 macOS 安装包必须通过 **Developer ID 签名与 Apple 公证**后才能发布。请从「应用程序」中打开应用，不要直接从 DMG 中运行。
 4. 启动后在应用「设置 → 权限与忽略」中按引导开启 **辅助功能**（屏幕取词）与 **屏幕录制**（区域框选 OCR）权限。
+
+从旧的未签名版或开发版迁移后，如果系统设置中已开启权限但应用仍检测不到，请退出应用，在「系统设置 → 隐私与安全性」中移除旧的 Light Translate 条目，重新添加「应用程序」中的新版并授权，再启动应用。签名变化可能需要这一次重新授权。
 
 ### 2. Windows 安装步骤
 1. 推荐下载 **`LightTranslate-Windows-x64-setup.exe`**（若需企业 MSI 部署可下载 **`LightTranslate-Windows-x64.msi`**）。
@@ -78,8 +77,11 @@ pnpm build
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri dev
 
-# 构建当前系统桌面安装包
+# 构建当前系统桌面安装包（开发测试，不作为正式 macOS 分发包）
 pnpm tauri build
+
+# macOS 本机构建并安装，使用钥匙串中的固定开发证书
+pnpm install:mac
 ```
 
 Rust 版本由仓库根目录的 `rust-toolchain.toml` 固定为 **1.90.0**。本机装有 `rustup` 时执行 `cargo` 会自动匹配该工具链版本。
@@ -102,6 +104,8 @@ export CARGO_TARGET_DIR="$HOME/Library/Caches/LightTranslateV2/target"
 - `src-tauri/native/macos_bridge.m` 中的 `LTNonActivatingPanel` 与 `_preventsActivation`
 
 因此本应用通过 GitHub Releases 直接分发 `.dmg`，无法上架 Mac App Store（移除上述能力会导致取词浮窗抢占当前阅读窗口焦点）。
+
+GitHub 分发同样需要 Developer ID 签名和 Apple 公证；私有 API 与未上架 App Store 不是缺少签名的原因。正式发布凭据与验证步骤见 [macOS 发布说明](docs/macos-release.md)。
 
 ---
 
