@@ -34,6 +34,7 @@ import {
   extractShortcutFromEvent,
   formatShortcutInline,
   toAstryxKbdKeys,
+  type LinuxSessionKind,
 } from "../shortcuts";
 import type { SettingsPane } from "./OverviewView";
 
@@ -71,6 +72,52 @@ function GroupedRowsCard({ children }: { children: React.ReactNode }) {
   );
 }
 
+function UnsupportedSettingRow({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="py-3.5 flex items-center justify-between gap-6">
+      <div className="min-w-0 space-y-0.5">
+        <div className="text-[14px] font-medium text-primary leading-snug">{title}</div>
+        <Text type="supporting">{description}</Text>
+      </div>
+      <div className="h-8 shrink-0 inline-flex items-center">
+        <Text type="supporting" weight="medium">
+          不支持
+        </Text>
+      </div>
+    </div>
+  );
+}
+
+function CapabilityRow({
+  title,
+  description,
+  value,
+}: {
+  title: string;
+  description: string;
+  value: string;
+}) {
+  return (
+    <div className="py-3.5 flex items-center justify-between gap-6">
+      <div className="min-w-0 space-y-0.5">
+        <div className="text-[14px] font-medium text-primary leading-snug">{title}</div>
+        <Text type="supporting">{description}</Text>
+      </div>
+      <div className="h-8 shrink-0 inline-flex items-center">
+        <Text type="supporting" weight="medium">
+          {value}
+        </Text>
+      </div>
+    </div>
+  );
+}
+
 function SettingSwitchRow({
   title,
   description,
@@ -100,6 +147,8 @@ export interface SettingsViewProps {
   permissions: PermissionsStatus | null;
   keyStatus: Record<string, boolean>;
   isMac: boolean;
+  isLinux: boolean;
+  linuxSession: LinuxSessionKind | null;
   defaultCaptureShortcut: string;
   defaultSelectionShortcut: string;
   pane: SettingsPane;
@@ -114,6 +163,8 @@ export function SettingsView({
   permissions,
   keyStatus,
   isMac,
+  isLinux,
+  linuxSession,
   defaultCaptureShortcut,
   defaultSelectionShortcut,
   pane,
@@ -363,7 +414,13 @@ export function SettingsView({
                   <VStack gap={6}>
                     <SettingsGroup
                       title="全局快捷键"
-                      description="在任意应用中唤起划词或区域取词。录制时按 Esc 取消，按 Delete 解绑。"
+                      description={
+                        isLinux
+                          ? linuxSession === "x11" || linuxSession === null
+                            ? "原生 X11 下用快捷键翻译当前选区。区域截屏在 Linux 上不可用。录制时按 Esc 取消，按 Delete 解绑。"
+                            : "全局快捷键只在原生 X11 会话可用。请改用托盘「翻译当前选区」或翻译页按钮。区域截屏在 Linux 上不可用。"
+                          : "在任意应用中唤起划词或区域取词。录制时按 Esc 取消，按 Delete 解绑。"
+                      }
                     >
                       <VStack gap={3}>
                         <GroupedRowsCard>
@@ -372,7 +429,12 @@ export function SettingsView({
                               {
                                 target: "selection" as ShortcutTarget,
                                 title: "划词翻译",
-                                subtitle: "翻译当前选中的文字",
+                                subtitle: isLinux
+                                  ? linuxSession === "x11" || linuxSession === null
+                                    ? "翻译当前 X11 选区（PRIMARY）"
+                                    : "当前会话抓不到全局按键"
+                                  : "翻译当前选中的文字",
+                                supported: !isLinux || linuxSession === "x11" || linuxSession === null,
                                 value: settings.selectionShortcut,
                                 defaultValue: defaultSelectionShortcut,
                                 onChange: (val: string) =>
@@ -381,7 +443,10 @@ export function SettingsView({
                               {
                                 target: "capture" as ShortcutTarget,
                                 title: "区域截屏",
-                                subtitle: "框选屏幕区域识别并翻译",
+                                subtitle: isLinux
+                                  ? "Linux 不提供区域 OCR"
+                                  : "框选屏幕区域识别并翻译",
+                                supported: !isLinux,
                                 value: settings.captureShortcut,
                                 defaultValue: defaultCaptureShortcut,
                                 onChange: (val: string) =>
@@ -405,6 +470,7 @@ export function SettingsView({
                                   <Text type="supporting">{item.subtitle}</Text>
                                 </div>
 
+                                {item.supported ? (
                                 <HStack align="center" gap={1.5}>
                                   <button
                                     type="button"
@@ -469,6 +535,13 @@ export function SettingsView({
                                     />
                                   )}
                                 </HStack>
+                                ) : (
+                                  <div className="h-8 shrink-0 inline-flex items-center">
+                                    <Text type="supporting" weight="medium">
+                                      不支持
+                                    </Text>
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -486,6 +559,32 @@ export function SettingsView({
                       </VStack>
                     </SettingsGroup>
 
+                    {isLinux ? (
+                      <SettingsGroup
+                        title="悬停、双击与识别辅助"
+                        description="这些入口在 macOS 与 Windows 上可用。Linux 不监听全局键鼠，也没有辅助功能树或离线 OCR。"
+                      >
+                        <GroupedRowsCard>
+                          <UnsupportedSettingRow
+                            title="悬停取词"
+                            description="按住 Alt 或 Ctrl 读取光标处文字"
+                          />
+                          <UnsupportedSettingRow
+                            title="双击修饰键"
+                            description="连按两次修饰键翻译选区"
+                          />
+                          <UnsupportedSettingRow
+                            title="视觉取词（OCR）"
+                            description="识别图片与扫描文档中的文字"
+                          />
+                          <UnsupportedSettingRow
+                            title="剪贴板兼容取词"
+                            description="不会模拟复制来抓取选区；复制按钮仍可写入剪贴板"
+                          />
+                        </GroupedRowsCard>
+                      </SettingsGroup>
+                    ) : (
+                    <>
                     <SettingsGroup
                       title="悬停与浮窗"
                       description="调整悬停触发键、响应延迟与浮窗收起方式。"
@@ -610,6 +709,8 @@ export function SettingsView({
                         />
                       </GroupedRowsCard>
                     </SettingsGroup>
+                    </>
+                    )}
                   </VStack>
                 </div>
               )}
@@ -840,9 +941,80 @@ export function SettingsView({
                       </SettingsGroup>
                     )}
 
+                    {isLinux && (
+                      <SettingsGroup
+                        title="Linux 桌面能力"
+                        description="这里是当前会话实际能做的事。Linux 没有可开关的辅助功能或屏幕录制权限。"
+                      >
+                        <GroupedRowsCard>
+                          <CapabilityRow
+                            title="桌面会话"
+                            description={
+                              linuxSession === "xwayland"
+                                ? "全局快捷键到不了原生 Wayland 窗口"
+                                : linuxSession === "wayland" || linuxSession === "headless"
+                                  ? "没有可用的 X11 选区"
+                                  : "可以读取 PRIMARY，并注册全局快捷键"
+                            }
+                            value={
+                              linuxSession === "x11"
+                                ? "原生 X11"
+                                : linuxSession === "xwayland"
+                                  ? "Wayland（XWayland）"
+                                  : linuxSession === "wayland"
+                                    ? "纯 Wayland"
+                                    : linuxSession === "headless"
+                                      ? "无图形会话"
+                                      : "检测中"
+                            }
+                          />
+                          <CapabilityRow
+                            title="辅助功能"
+                            description="没有悬停取词所需的辅助功能树"
+                            value="不支持"
+                          />
+                          <CapabilityRow
+                            title="屏幕录制"
+                            description="没有区域截屏 OCR"
+                            value="不支持"
+                          />
+                          <CapabilityRow
+                            title="选区读取"
+                            description={
+                              linuxSession === "xwayland"
+                                ? "原生 Wayland 窗口里的选区读不到"
+                                : linuxSession === "wayland" || linuxSession === "headless"
+                                  ? "请把文字粘贴到翻译页"
+                                  : "读取 X11 PRIMARY 选区"
+                            }
+                            value={
+                              linuxSession === "x11"
+                                ? "可用"
+                                : linuxSession === "xwayland"
+                                  ? "仅 X11 应用"
+                                  : "不可用"
+                            }
+                          />
+                          <CapabilityRow
+                            title="剪贴板复制"
+                            description="浮窗与翻译页的复制按钮写入系统剪贴板"
+                            value={
+                              linuxSession === "wayland" || linuxSession === "headless"
+                                ? "不保证可用"
+                                : "可写入"
+                            }
+                          />
+                        </GroupedRowsCard>
+                      </SettingsGroup>
+                    )}
+
                     <SettingsGroup
                       title="忽略应用"
-                      description="在这些应用中自动暂停悬停与双击取词。"
+                      description={
+                        isLinux
+                          ? "Linux 无法取得前台应用名称，此列表不会生效。"
+                          : "在这些应用中自动暂停悬停与双击取词。"
+                      }
                     >
                       <Card>
                         <VStack gap={3}>
@@ -854,11 +1026,14 @@ export function SettingsView({
                                 width="100%"
                                 value={newExcludedApp}
                                 onChange={setNewExcludedApp}
-                                onEnter={handleAddExcludedApp}
+                                onEnter={isLinux ? undefined : handleAddExcludedApp}
+                                isDisabled={isLinux}
                                 placeholder={
-                                  isMac
-                                    ? "输入 Bundle ID，例如 com.apple.Terminal"
-                                    : "输入进程名，例如 code.exe"
+                                  isLinux
+                                    ? "Linux 无法识别应用名称"
+                                    : isMac
+                                      ? "输入 Bundle ID，例如 com.apple.Terminal"
+                                      : "输入进程名，例如 code.exe"
                                 }
                               />
                             </div>
@@ -866,7 +1041,7 @@ export function SettingsView({
                               variant="secondary"
                               size="md"
                               label="添加"
-                              isDisabled={!newExcludedApp.trim()}
+                              isDisabled={isLinux || !newExcludedApp.trim()}
                               onClick={handleAddExcludedApp}
                             />
                           </div>

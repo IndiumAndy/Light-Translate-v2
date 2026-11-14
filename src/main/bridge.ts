@@ -282,6 +282,12 @@ export const appBridge = {
     }
   },
 
+  async translateCurrentSelection(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("translate_current_selection");
+    }
+  },
+
   async copyText(text: string): Promise<void> {
     if (isTauriRuntime()) {
       await invoke("popup_copy_text", { text });

@@ -56,4 +56,5 @@ windows = { version = "0.58", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "xfixes"] }
+arboard = "3"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "xfixes", "randr"] }

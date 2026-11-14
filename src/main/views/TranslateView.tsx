@@ -19,6 +19,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { ArrowRight, Bookmark, Check, Copy } from "lucide-react";
 import type { QueryMode, WordEntry } from "../../shared/types";
 import { appBridge } from "../bridge";
+import type { LinuxSessionKind } from "../shortcuts";
 
 export interface TranslateViewProps {
   targetLanguage: string;
@@ -36,6 +37,9 @@ export interface TranslateViewProps {
   onRunTranslate: () => void;
   onClearTranslate: () => void;
   onSavedEntry: () => Promise<void>;
+  isLinux: boolean;
+  linuxSession: LinuxSessionKind | null;
+  onTranslateSelection: () => Promise<void>;
 }
 
 export function TranslateView({
@@ -54,6 +58,9 @@ export function TranslateView({
   onRunTranslate,
   onClearTranslate,
   onSavedEntry,
+  isLinux,
+  linuxSession,
+  onTranslateSelection,
 }: TranslateViewProps) {
   const showToast = useToast();
   const [copied, setCopied] = useState(false);
@@ -136,6 +143,31 @@ export function TranslateView({
               </SegmentedControl>
             </HStack>
 
+            {isLinux &&
+              (linuxSession === "wayland" ||
+                linuxSession === "headless" ||
+                linuxSession === "xwayland") && (
+                <Banner
+                  status="warning"
+                  title={
+                    linuxSession === "xwayland"
+                      ? "当前是 Wayland（XWayland）"
+                      : "当前会话没有 X11 选区"
+                  }
+                  description={
+                    linuxSession === "xwayland"
+                      ? "「翻译当前选区」只能读到 X11 应用里的选中文字。原生 Wayland 窗口请把文字粘贴到下方。"
+                      : "Wayland 下无法读取选区，也不能注册全局快捷键。请把文字粘贴到下方手动翻译。"
+                  }
+                  collapsible={false}
+                />
+              )}
+            {isLinux && (linuxSession === "x11" || linuxSession === null) && (
+              <Text type="supporting">
+                在其他应用中选中文字后，点「翻译当前选区」，或使用托盘菜单。原生 X11 下也可以用全局快捷键。
+              </Text>
+            )}
+
             {/* Source Input Composer using Native Astryx TextArea */}
             <Card>
               <VStack gap={3}>
@@ -175,6 +207,22 @@ export function TranslateView({
                         onClick={() => {
                           onClearTranslate();
                           textareaRef.current?.focus();
+                        }}
+                      />
+                    )}
+                    {isLinux && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        label="翻译当前选区"
+                        onClick={() => {
+                          onTranslateSelection().catch((err: unknown) => {
+                            showToast({
+                              body: err instanceof Error ? err.message : String(err),
+                              uniqueID: "selection-translate",
+                              autoHideDuration: 2400,
+                            });
+                          });
                         }}
                       />
                     )}
