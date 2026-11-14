@@ -65,6 +65,14 @@ fn estimate_initial_popup_height(card: &PopupCardViewState) -> f64 {
     h.clamp(60.0, 260.0)
 }
 
+#[cfg(target_os = "linux")]
+fn format_selection_tray_label(selection_shortcut: &str) -> String {
+    match ShortcutSpec::parse(selection_shortcut) {
+        Some(spec) => format!("翻译当前选区 ({})", spec.format_display(false)),
+        None => "翻译当前选区".into(),
+    }
+}
+
 fn format_capture_tray_label(capture_shortcut: &str) -> String {
     match ShortcutSpec::parse(capture_shortcut) {
         Some(spec) => format!(
@@ -105,6 +113,8 @@ pub struct AppController {
     pub active_request_kind: AtomicU8,
     pub tray_toggle_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     pub tray_capture_item: Mutex<Option<MenuItem<tauri::Wry>>>,
+    #[cfg(target_os = "linux")]
+    pub tray_selection_item: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
 
 pub(crate) fn execute_hover_extraction(
@@ -152,6 +162,10 @@ impl AppController {
         }
         if let Some(capture) = self.tray_capture_item.lock().as_ref() {
             let _ = capture.set_text(format_capture_tray_label(&settings.capture_shortcut));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(selection) = self.tray_selection_item.lock().as_ref() {
+            let _ = selection.set_text(format_selection_tray_label(&settings.selection_shortcut));
         }
     }
     pub fn write_diagnostics(&self, last_event: &str, last_outcome: &str, target_app: Option<&str>) {
@@ -413,11 +427,30 @@ impl AppController {
                 snapshot.generation = gen;
                 self.present_and_translate(snapshot, true).await;
             }
+            Some(Ok(None)) if explicit_trigger && cfg!(target_os = "linux") => {
+                self.active_request_kind
+                    .store(REQUEST_KIND_SELECTION, Ordering::Relaxed);
+                let gen = self.gate.advance();
+                let message = match self.platform.permissions_status(false).platform.as_str() {
+                    "linux-wayland" | "linux-headless" => {
+                        "当前会话无法读取选区。Wayland 下请把文字粘贴到主窗口手动翻译。"
+                    }
+                    _ => "未读取到选中文本。请先在应用中选中文字，再试一次。",
+                };
+                self.present_status_card(gen, pointer, message);
+            }
             Some(Err(failure)) if explicit_trigger => {
                 self.active_request_kind
                     .store(REQUEST_KIND_SELECTION, Ordering::Relaxed);
                 let gen = self.gate.advance();
-                self.present_status_card(gen, pointer, failure.user_message());
+                let message = if cfg!(target_os = "linux")
+                    && matches!(failure, ExtractionFailure::NotSupported)
+                {
+                    "当前会话无法读取选区。Wayland 下请把文字粘贴到主窗口手动翻译。"
+                } else {
+                    failure.user_message()
+                };
+                self.present_status_card(gen, pointer, message);
             }
             _ => {}
         }
@@ -876,6 +909,13 @@ impl AppController {
     }
 
     pub async fn open_capture_overlay(self: &Arc<Self>, hide_main_first: bool) {
+        if cfg!(target_os = "linux") {
+            let pt = self.platform.current_pointer();
+            let gen = self.gate.advance();
+            self.present_status_card(gen, pt, "Linux 暂不支持区域截屏 OCR");
+            return;
+        }
+
         if cfg!(target_os = "macos") && !self.platform.permissions_status(false).screen_recording {
             let _ = self.platform.request_screen_recording();
             let pt = self.platform.current_pointer();
@@ -1793,22 +1833,38 @@ fn open_main_tab(tab: String, ctrl: State<'_, Arc<AppController>>) {
     ctrl.open_main_window(&tab);
 }
 
+#[tauri::command]
+async fn translate_current_selection(ctrl: State<'_, Arc<AppController>>) -> Result<(), String> {
+    if !ctrl.storage.settings().enabled {
+        return Err("选区翻译已暂停".into());
+    }
+    let pointer = ctrl.platform.current_pointer();
+    ctrl.run_selection_flow(pointer, true).await;
+    Ok(())
+}
+
 // ============================================================================
 // Application Bootstrap & System Tray Setup
 // ============================================================================
 
 fn setup_tray(app: &AppHandle, ctrl: &Arc<AppController>) -> tauri::Result<()> {
     let initial_settings = ctrl.storage.settings();
+    let toggle_label = if cfg!(target_os = "linux") {
+        "启用选区翻译"
+    } else {
+        "启用取词与快捷键翻译"
+    };
     let toggle_item = CheckMenuItem::with_id(
         app,
         "toggle_enabled",
-        "启用取词与快捷键翻译",
+        toggle_label,
         true,
         initial_settings.enabled,
         None::<&str>,
     )?;
     let home_item = MenuItem::with_id(app, "open_home", "翻译概览与热力图…", true, None::<&str>)?;
     let manual_item = MenuItem::with_id(app, "open_translate", "手动对照翻译…", true, None::<&str>)?;
+    #[cfg(not(target_os = "linux"))]
     let capture_item = MenuItem::with_id(
         app,
         "trigger_capture",
@@ -1816,12 +1872,43 @@ fn setup_tray(app: &AppHandle, ctrl: &Arc<AppController>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    #[cfg(target_os = "linux")]
+    let selection_item = MenuItem::with_id(
+        app,
+        "translate_selection",
+        format_selection_tray_label(&initial_settings.selection_shortcut),
+        true,
+        None::<&str>,
+    )?;
     *ctrl.tray_toggle_item.lock() = Some(toggle_item.clone());
-    *ctrl.tray_capture_item.lock() = Some(capture_item.clone());
+    #[cfg(not(target_os = "linux"))]
+    {
+        *ctrl.tray_capture_item.lock() = Some(capture_item.clone());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        *ctrl.tray_selection_item.lock() = Some(selection_item.clone());
+    }
     let wordbook_item = MenuItem::with_id(app, "open_wordbook", "生词收藏本…", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "open_settings", "偏好设置…", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit_app", "退出 Light Translate", true, None::<&str>)?;
 
+    #[cfg(target_os = "linux")]
+    let menu = Menu::with_items(
+        app,
+        &[
+            &toggle_item,
+            &PredefinedMenuItem::separator(app)?,
+            &selection_item,
+            &home_item,
+            &manual_item,
+            &wordbook_item,
+            &settings_item,
+            &PredefinedMenuItem::separator(app)?,
+            &quit_item,
+        ],
+    )?;
+    #[cfg(not(target_os = "linux"))]
     let menu = Menu::with_items(
         app,
         &[
@@ -1874,6 +1961,15 @@ fn setup_tray(app: &AppHandle, ctrl: &Arc<AppController>) -> tauri::Result<()> {
             }
             "open_home" => ctrl_menu.open_main_window("home"),
             "open_translate" => ctrl_menu.open_main_window("translate"),
+            "translate_selection" => {
+                if ctrl_menu.storage.settings().enabled {
+                    let ctrl_sel = Arc::clone(&ctrl_menu);
+                    tauri::async_runtime::spawn(async move {
+                        let pointer = ctrl_sel.platform.current_pointer();
+                        ctrl_sel.run_selection_flow(pointer, true).await;
+                    });
+                }
+            }
             "trigger_capture" => {
                 let ctrl_cap = Arc::clone(&ctrl_menu);
                 tauri::async_runtime::spawn(async move {
@@ -1927,6 +2023,8 @@ pub fn run() {
                 active_request_kind: AtomicU8::new(REQUEST_KIND_NONE),
                 tray_toggle_item: Mutex::new(None),
                 tray_capture_item: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                tray_selection_item: Mutex::new(None),
             });
             controller.write_diagnostics("startup", "ready", None);
 
@@ -2006,6 +2104,7 @@ pub fn run() {
             get_permissions_status,
             request_screen_recording,
             open_main_tab,
+            translate_current_selection,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Light Translate v2");
