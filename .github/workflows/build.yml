@@ -7,9 +7,18 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      sign_macos:
+        description: Sign and notarize macOS artifacts without publishing a Release
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test-core:
@@ -17,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test macOS release safeguards
+        run: python3 -m unittest discover -s scripts/tests -v
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -55,8 +66,21 @@ jobs:
             os_label: linux
             tauri_args: "--bundles deb,rpm,appimage"
     runs-on: ${{ matrix.platform }}
+    env:
+      SIGN_MACOS: ${{ matrix.os_label == 'macos' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.sign_macos)) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Developer ID signing for official macOS releases
+        if: env.SIGN_MACOS == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: bash scripts/setup-macos-ci-signing.sh
 
       - name: Install Linux dependencies
         if: matrix.os_label == 'linux'
@@ -86,7 +110,31 @@ jobs:
         run: pnpm install --frozen-lockfile || pnpm install
 
       - name: Build Tauri platform bundles
+        if: env.SIGN_MACOS != 'true'
         run: pnpm tauri build ${{ matrix.tauri_args }}
+
+      - name: Build, sign and notarize official macOS application
+        if: env.SIGN_MACOS == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: pnpm tauri build ${{ matrix.tauri_args }}
+
+      - name: Notarize and verify the downloadable macOS installer
+        if: env.SIGN_MACOS == 'true'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          shopt -s nullglob
+          installers=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          test "${#installers[@]}" -eq 1
+          bash scripts/notarize-macos-dmg.sh "${installers[0]}"
 
       - name: Normalize macOS installer filename
         if: matrix.os_label == 'macos'
@@ -134,11 +182,22 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+      - name: Remove temporary macOS signing keychain
+        if: always() && env.SIGN_MACOS == 'true'
+        shell: bash
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/lighttranslate-signing.keychain-db"
+          if [[ -f "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
+
   publish-release:
     name: Publish Cross-Platform GitHub Release
     needs: build-bundles
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -146,6 +205,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: collected-assets
+          pattern: release-*
           merge-multiple: true
 
       - name: Generate SHA256 checksums and publish GitHub Release
@@ -154,6 +214,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           TAG="v${VERSION}"
+          test "$GITHUB_REF_NAME" = "$TAG"
           cd collected-assets
           sha256sum LightTranslate-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -172,12 +233,14 @@ jobs:
           | **Linux (X11)** | 免安装单文件通用版 (x86_64) | \`LightTranslate-Linux-x86_64.AppImage\` |
           | **Linux (X11)** | Fedora / RHEL / openSUSE (x86_64) | \`LightTranslate-Linux-x86_64.rpm\` |
 
+          macOS 安装包及应用均已通过 Developer ID 签名、Apple 公证和 Gatekeeper 校验。将应用拖入「应用程序」后启动，按系统提示授予辅助功能和屏幕录制权限。
+
           > 校验值请参考附件中的 \`SHA256SUMS.txt\`。各平台详细安装说明见仓库 [README.md](https://github.com/${{ github.repository }}#下载与安装macos--windows--linux)。
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" LightTranslate-* SHA256SUMS.txt --clobber
-            gh release edit "$TAG" --title "Light Translate ${TAG}" --notes-file release-notes.md --draft=false --latest
+            echo "Release $TAG already exists; publish a new version instead of replacing its assets." >&2
+            exit 1
           else
             gh release create "$TAG" LightTranslate-* SHA256SUMS.txt \
               --target "${{ github.sha }}" \

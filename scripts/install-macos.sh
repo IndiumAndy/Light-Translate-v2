@@ -16,12 +16,29 @@ fi
 if [[ -z "$SIGNING_ID" ]]; then
   SIGNING_ID="$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development:/ {print $2; exit}')"
 fi
+if [[ -z "$SIGNING_ID" || "$SIGNING_ID" == "-" ]]; then
+  echo 'A stable Apple signing certificate is required. Install an Apple Development certificate or set APPLE_SIGNING_IDENTITY.' >&2
+  exit 1
+fi
+security find-identity -v -p codesigning | grep -Fq "\"$SIGNING_ID\"" || {
+  echo 'The requested signing identity is not available in the keychain.' >&2
+  exit 1
+}
 
 cd "$ROOT_DIR"
-CARGO_TARGET_DIR="$TARGET_DIR" pnpm tauri build --bundles app
+APPLE_SIGNING_IDENTITY="$SIGNING_ID" CARGO_TARGET_DIR="$TARGET_DIR" pnpm tauri build --bundles app
 
 BUILT_APP="$TARGET_DIR/release/bundle/macos/$APP_NAME"
 DEST_APP="$DEST_DIR/$APP_NAME"
+
+# Verify the built bundle before replacing an installed application. Tauri signs
+# nested code and the final bundle; do not re-sign it after copying.
+codesign --verify --deep --strict "$BUILT_APP"
+REQUIREMENT="$(codesign --display --requirements - "$BUILT_APP" 2>&1)"
+if grep '^designated =>' <<< "$REQUIREMENT" | grep -qi cdhash; then
+  echo 'Refusing to install a build with an unstable signing requirement.' >&2
+  exit 1
+fi
 
 pkill -x light-translate-v2 || true
 sleep 0.4
@@ -29,15 +46,6 @@ sleep 0.4
 mkdir -p "$DEST_DIR"
 rm -rf "$DEST_APP"
 ditto "$BUILT_APP" "$DEST_APP"
-xattr -cr "$DEST_APP"
-
-if [[ -n "$SIGNING_ID" ]]; then
-  echo "Signing with stable identity: $SIGNING_ID"
-  codesign --force --deep --options runtime --sign "$SIGNING_ID" "$DEST_APP"
-else
-  echo "Warning: No Apple Development certificate found; falling back to ad-hoc signing (TCC permissions will reset on rebuild)."
-  codesign --force --deep --sign - "$DEST_APP"
-fi
 
 codesign --verify --deep --strict "$DEST_APP"
 open "$DEST_APP"
