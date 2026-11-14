@@ -9,7 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       sign_macos:
-        description: Sign and notarize macOS artifacts without publishing a Release
+        description: Prepare a signed macOS build without publishing a Release
+        type: boolean
+        default: false
+      submit_new:
+        description: Upload one new Apple submission. Leave false to avoid another upload.
         type: boolean
         default: false
 
@@ -17,7 +21,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.workflow }}-${{ github.ref }}
+  # Signing runs share one queue. Other builds stay on their own ref and are not cancelled.
+  group: ${{ ((github.event_name == 'workflow_dispatch' && inputs.sign_macos) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && 'apple-notarization' || format('build-{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: false
 
 jobs:
@@ -49,9 +54,22 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+  refuse-unconfirmed-notary-upload:
+    name: Refuse unconfirmed Apple upload
+    needs: test-core
+    if: github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new
+    runs-on: ubuntu-latest
+    steps:
+      - name: Do not build or upload
+        run: |
+          echo "NOTARY_STATUS action=refused-new-upload"
+          echo "sign_macos was set without submit_new. No binary was built and nothing was sent to Apple."
+          echo "Query the saved submission IDs with the Query macOS notarization workflow."
+
   build-bundles:
     name: Build (${{ matrix.os_label }})
     needs: test-core
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.sign_macos && !inputs.submit_new) || (github.event_name == 'workflow_dispatch' && inputs.sign_macos && matrix.os_label != 'macos')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,9 +85,13 @@ jobs:
             tauri_args: "--bundles deb,rpm,appimage"
     runs-on: ${{ matrix.platform }}
     env:
-      SIGN_MACOS: ${{ matrix.os_label == 'macos' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.sign_macos)) }}
+      SIGN_MACOS: ${{ matrix.os_label == 'macos' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.sign_macos && inputs.submit_new)) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Remember when this signing attempt started
+        if: env.SIGN_MACOS == 'true'
+        run: echo "LT_NOTARY_SUBMIT_AFTER=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Set up Developer ID signing for official macOS releases
         if: env.SIGN_MACOS == 'true'

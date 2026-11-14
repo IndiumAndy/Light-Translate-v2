@@ -25,15 +25,17 @@ Apple 账号如有待接受的新开发者协议，须由账号持有人先处�
 2. 合并并通过常规 CI 后，在该提交上推送对应的 `v<版本号>` 标签。
 3. 标签触发正式构建；普通分支与 PR 仅构建测试包，不接触签名凭据，也不创建公开 Release。
 
-发布前可手动运行工作流并勾选 `sign_macos`，使用相同流程签名、公证和验证 CI artifact，但不会公开发布。这样可先验证凭据与最终安装包，再推送版本标签。
+发布前用「Query macOS notarization」查询已经交给 Apple 的 submission ID。该工作流不编译、不上传、不发布。要对一份新的二进制签名并公证，需同时勾选 `sign_macos` 和 `submit_new`；只勾选 `sign_macos` 不会构建或上传。手动流程不会创建公开 Release。
 
-macOS CI 使用临时钥匙串导入证书，由 Tauri 生成双架构应用并签名、启用 hardened runtime。发布脚本独立提交应用公证，保存提交编号并查询结果；确认 Apple 接受后装订并验证应用票据。随后用系统 `hdiutil` 将已装订的应用和「应用程序」文件夹链接打包为 DMG，对 DMG 签名、公证和装订票据。构建结束会删除临时钥匙串。
+macOS CI 使用临时钥匙串导入证书，由 Tauri 生成双架构应用并签名、启用 hardened runtime。Tauri 拿不到公证凭据。发布脚本对应用归档只上传一次，保存提交编号并查询结果；确认 Apple 接受后装订并验证应用票据。随后用系统 `hdiutil` 将已装订的应用和「应用程序」文件夹链接打包为 DMG，对 DMG 签名，再对 DMG 只上传一次并装订票据。构建结束会删除临时钥匙串。
 
 发布前 `scripts/verify-macos-release.sh` 检查 DMG 和只读挂载后的应用：有效的 Apple Developer ID 证书链、指定团队、固定 bundle ID、不包含 cdhash 的 designated requirement、Intel/Apple Silicon 双架构、各架构的 hardened runtime 和可信时间戳、两层公证票据及 Gatekeeper 接受结果。任一步失败都会阻止发布。已存在的 Release 不覆盖，需使用新版本号。
 
-首次公证可能等待较久。应用和 DMG 的公证分别默认最多等待两小时，可通过 `LT_NOTARY_TIMEOUT` 调整。每次上传立即保存 Apple submission ID、文件 SHA256 和状态到 `*.notarization.json`；状态查询遇到网络断开或超时会重试，同一份文件及回执可继续查询已有编号，不会重复上传。文件内容变化后旧回执不能用于新文件。只有 Apple 明确返回 `Accepted` 才会继续装订票据；票据检索也有有限次数的网络重试。
+首次公证可能等待较久。应用和 DMG 分别默认最多等待两小时，可通过 `LT_NOTARY_TIMEOUT` 调整。每次上传立即保存 Apple submission ID、文件 SHA256 和状态到 `*.notarization.json`。状态查询遇到网络断开或超时会继续查询同一个编号。上传没有返回编号时不会再上传。文件内容变化后旧回执不能用于新文件。只有 Apple 明确返回 `Accepted` 才会装订票据；票据检索最多重试五次。
 
-超时或拒绝都会阻止发布。CI 保留签名应用 ZIP、DMG 和回执七天用于恢复验收；`macos-notarization-recovery-*` artifact 不会被公开 Release 收集。恢复时将文件和对应回执放在一起，运行 `python3 scripts/notarize_macos.py <文件>` 可继续查询已有提交。必须完成票据装订及整个安装包验收后才能发布。
+客户端在 Apple 仍为 `In Progress` 时超时，或轮询时网络中断，都不是 Apple 拒绝。不要因此重新运行失败 job：新的 runner 会编出另一份二进制并再次上传。最近 12 小时内还有 `In Progress` 提交时，签名任务会在编译前停止。用「Query macOS notarization」查询原来的编号，包括 Apple 返回 `Invalid` 或 `Rejected` 时的公证日志。标签发布使用同一条限制。
+
+超时或拒绝都会阻止发布。CI 保留签名应用 ZIP、DMG 和回执七天；`macos-notarization-recovery-*` artifact 不会被公开 Release 收集。手里仍有同一份文件和回执时，运行 `python3 scripts/notarize_macos.py <文件>` 只查询已有编号。必须完成票据装订及整个安装包验收后才能发布。
 
 也可在 Mac 上对实际下载的文件独立验收：
 
