@@ -1,0 +1,33 @@
+name: Query macOS notarization
+
+on:
+  workflow_dispatch:
+    inputs:
+      submission_ids:
+        description: Comma-separated Apple submission IDs. This workflow never uploads.
+        required: true
+        type: string
+        default: "6f3e89b3-a007-488a-8169-934e4538ff3c,fead72bc-32cd-448d-b2b6-b10d8aa4ec98,50da0ca2-671e-4892-918b-afc1aff406b2,3b568336-28a8-47d3-9f03-163bfa12d74e,1d0948ba-9674-46fd-8b9d-6ae23104b59e"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-notary-query
+  cancel-in-progress: false
+
+jobs:
+  query:
+    name: Query saved Apple submissions
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read notarization status without uploading
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_QUERY_IDS: ${{ inputs.submission_ids }}
+          LT_NOTARY_MAX_POLLS: "1"
+        run: python3 scripts/notarize_macos.py --query-only

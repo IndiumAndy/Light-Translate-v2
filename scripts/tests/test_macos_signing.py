@@ -38,7 +38,15 @@ if name == 'codesign':
             print('Timestamp=Nov 13, 2026')
 elif name == 'xcrun':
     if args[:2] == ['notarytool', 'submit']:
+        if failure == 'upload-lost':
+            print('connection reset', file=sys.stderr)
+            sys.exit(1)
         print(json.dumps({'id': 'test-request'}))
+    elif args[:2] == ['notarytool', 'history']:
+        if failure == 'pending-queue':
+            print(json.dumps({'history': [{'id': 'pending-request', 'status': 'In Progress'}]}))
+        else:
+            print(json.dumps({'history': []}))
     elif args[:2] == ['notarytool', 'info']:
         if failure == 'notary-timeout':
             print('Network timeout', file=sys.stderr)
@@ -48,8 +56,9 @@ elif name == 'xcrun':
         sys.exit(1)
 elif name == 'spctl' and failure == 'gatekeeper':
     sys.exit(1)
-elif name == 'lipo' and failure == 'architecture':
-    sys.exit(1)
+elif name == 'lipo':
+    if failure == 'architecture' or (args and args[0] == '-verify_arch'):
+        sys.exit(1)
 elif name == 'hdiutil':
     if args[0] == 'create':
         pathlib.Path(args[-1]).touch()
@@ -133,6 +142,9 @@ class SigningSafeguards(unittest.TestCase):
         calls = self.calls()
         self.assertTrue(any(c[:3] == ["spctl", "--assess", "--type"] and "execute" in c for c in calls))
         self.assertTrue(any(c[:2] == ["hdiutil", "detach"] for c in calls))
+        lipo = next(c for c in calls if c[0] == "lipo")
+        self.assertEqual(lipo[2:5], ["-verify_arch", "arm64", "x86_64"])
+        self.assertTrue(lipo[1].endswith("light-translate-v2"))
 
     def test_every_failed_apple_check_blocks_release(self):
         for check in ("signature", "certificate", "team", "development", "cdhash", "runtime",
@@ -191,6 +203,37 @@ class SigningSafeguards(unittest.TestCase):
         result = self.run_script("setup-macos-ci-signing.sh")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls(), [])
+
+    def test_pending_submission_stops_before_a_new_build(self):
+        self.env["FAIL_CHECK"] = "pending-queue"
+        self.env["CARGO_TARGET_DIR"] = str(self.base / "target")
+        result = self.run_script("build-macos-release.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pending-request", result.stderr)
+        self.assertFalse(any(c[0] == "pnpm" or c[:3] == ["xcrun", "notarytool", "submit"] for c in self.calls()))
+
+    def test_lost_upload_response_is_not_sent_again(self):
+        self.env["FAIL_CHECK"] = "upload-lost"
+        result = self.run_script("notarize-macos-dmg.sh", self.dmg)
+        self.assertNotEqual(result.returncode, 0)
+        submits = [c for c in self.calls() if len(c) >= 3 and c[:3] == ["xcrun", "notarytool", "submit"]]
+        self.assertEqual(len(submits), 1)
+
+    def test_query_workflow_cannot_start_from_a_push_or_pull_request(self):
+        query = (ROOT / ".github/workflows/macos-notary-query.yml").read_text()
+        triggers = query.split("on:", 1)[1].split("permissions:", 1)[0]
+        self.assertIn("workflow_dispatch:", triggers)
+        for forbidden in ("push:", "pull_request:", "schedule:", "workflow_call:"):
+            self.assertNotIn(forbidden, triggers)
+        self.assertNotIn("notarytool submit", query)
+        build = (ROOT / ".github/workflows/build.yml").read_text()
+        submit_block = build.split("submit_new:", 1)[1].split("permissions:", 1)[0]
+        self.assertIn("default: false", submit_block)
+        self.assertIn("inputs.submit_new", build)
+        job_if = build.split("build-bundles:", 1)[1].split("strategy:", 1)[0]
+        condition = [line for line in job_if.splitlines() if line.strip().startswith("if:")]
+        self.assertEqual(len(condition), 1)
+        self.assertNotIn("matrix.", condition[0])
 
     def test_local_installer_does_not_fall_back_to_adhoc(self):
         self.env["APPLE_SIGNING_IDENTITY"] = "-"

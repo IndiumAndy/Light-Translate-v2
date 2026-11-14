@@ -58,7 +58,9 @@ fi
 grep -Fq 'identifier "com.atat.lighttranslate.v2"' <<< "$DESIGNATED"
 
 APP_EXECUTABLE="$APP_PATH/Contents/MacOS/light-translate-v2"
-lipo -verify_arch arm64 x86_64 "$APP_EXECUTABLE"
+# Current lipo requires the input file before the command. The old flag-first
+# form treats the executable path as an architecture name.
+lipo "$APP_EXECUTABLE" -verify_arch arm64 x86_64
 for arch in arm64 x86_64; do
   DETAILS="$(codesign --display --verbose=4 --arch "$arch" "$APP_PATH" 2>&1)"
   grep -Eq '^CodeDirectory .*flags=.*\(.*runtime.*\)' <<< "$DETAILS"
