@@ -56,8 +56,9 @@ elif name == 'xcrun':
         sys.exit(1)
 elif name == 'spctl' and failure == 'gatekeeper':
     sys.exit(1)
-elif name == 'lipo' and failure == 'architecture':
-    sys.exit(1)
+elif name == 'lipo':
+    if failure == 'architecture' or (args and args[0] == '-verify_arch'):
+        sys.exit(1)
 elif name == 'hdiutil':
     if args[0] == 'create':
         pathlib.Path(args[-1]).touch()
@@ -141,6 +142,9 @@ class SigningSafeguards(unittest.TestCase):
         calls = self.calls()
         self.assertTrue(any(c[:3] == ["spctl", "--assess", "--type"] and "execute" in c for c in calls))
         self.assertTrue(any(c[:2] == ["hdiutil", "detach"] for c in calls))
+        lipo = next(c for c in calls if c[0] == "lipo")
+        self.assertEqual(lipo[2:5], ["-verify_arch", "arm64", "x86_64"])
+        self.assertTrue(lipo[1].endswith("light-translate-v2"))
 
     def test_every_failed_apple_check_blocks_release(self):
         for check in ("signature", "certificate", "team", "development", "cdhash", "runtime",
