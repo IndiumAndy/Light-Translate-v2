@@ -97,10 +97,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Remember when this signing attempt started
-        if: env.SIGN_MACOS == 'true'
-        run: echo "LT_NOTARY_SUBMIT_AFTER=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-
       - name: Set up Developer ID signing for official macOS releases
         if: env.SIGN_MACOS == 'true'
         env:

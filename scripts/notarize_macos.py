@@ -106,14 +106,27 @@ def parse_timestamp(value):
     return parsed.astimezone(timezone.utc)
 
 
-def submit_after_from_env():
-    raw = os.environ.get("LT_NOTARY_SUBMIT_AFTER", "").strip()
-    if not raw:
-        return None
-    parsed = parse_timestamp(raw)
-    if parsed is None:
-        raise NotarizationError("LT_NOTARY_SUBMIT_AFTER must be a UTC timestamp")
-    return parsed
+def own_submission_ids():
+    raw = os.environ.get("LT_NOTARY_OWN_SUBMISSIONS", "")
+    return {item.strip() for item in raw.split(",") if SUBMISSION_ID.fullmatch(item.strip())}
+
+
+def accepted_submission_id(payload):
+    receipt_path = Path(str(payload) + ".notarization.json")
+    if not payload.is_file() or not receipt_path.is_file():
+        return ""
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(receipt, dict) or receipt.get("status") != "Accepted":
+        return ""
+    if receipt.get("sha256") != archive_hash(payload):
+        return ""
+    submission_id = receipt.get("id")
+    if not isinstance(submission_id, str) or not SUBMISSION_ID.fullmatch(submission_id.strip()):
+        return ""
+    return submission_id.strip()
 
 
 def pending_window():
@@ -140,7 +153,7 @@ def history_entries(data, error):
     return history
 
 
-def blocking_submission_ids(entries, submit_after, wall_time):
+def blocking_submission_ids(entries, wall_time, own_ids):
     window_start = wall_time - pending_window()
     blocked = []
     for entry in entries:
@@ -151,10 +164,10 @@ def blocking_submission_ids(entries, submit_after, wall_time):
             blocked.append("unknown")
             continue
         submission_id = submission_id.strip()
+        if submission_id in own_ids:
+            continue
         created = parse_timestamp(entry.get("createdDate"))
         if created is not None and created < window_start:
-            continue
-        if submit_after is not None and created is not None and created >= submit_after:
             continue
         blocked.append(submission_id)
     return blocked
@@ -164,7 +177,7 @@ def refuse_pending_uploads(request, request_timeout, wall_clock=None):
     wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
     data, error = request(["history"], request_timeout)
     blocked = blocking_submission_ids(
-        history_entries(data, error), submit_after_from_env(), wall_clock())
+        history_entries(data, error), wall_clock(), own_submission_ids())
     if blocked:
         joined = ", ".join(blocked)
         raise NotarizationError(
@@ -325,8 +338,14 @@ def main():
     parser.add_argument("--staple", type=Path)
     parser.add_argument("--require-idle", action="store_true")
     parser.add_argument("--query-only", action="store_true")
+    parser.add_argument("--print-matching-id", action="store_true")
     args = parser.parse_args()
     try:
+        if args.print_matching_id:
+            if args.payload is None:
+                raise NotarizationError("Notarization payload does not exist")
+            print(accepted_submission_id(args.payload), end="")
+            return 0
         if args.require_idle and args.query_only:
             raise NotarizationError("Choose either --require-idle or --query-only")
         if args.require_idle:

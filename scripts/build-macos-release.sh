@@ -4,9 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 bash scripts/check-macos-signing-env.sh
-if [[ -z "${LT_NOTARY_SUBMIT_AFTER:-}" ]]; then
-  export LT_NOTARY_SUBMIT_AFTER="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-fi
 # Stop before compiling when Apple still has a recent submission in progress.
 python3 scripts/notarize_macos.py --require-idle
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/src-tauri/target}"

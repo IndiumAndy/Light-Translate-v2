@@ -198,10 +198,41 @@ class NotarizationRecovery(unittest.TestCase):
                 return {"id": "33333333-3333-3333-3333-333333333333"}, ""
             return {"id": "33333333-3333-3333-3333-333333333333", "status": "Accepted"}, ""
 
-        with patch.dict(os.environ, {"LT_NOTARY_SUBMIT_AFTER": "2026-11-14T08:30:00Z"}):
+        with patch.dict(os.environ, {"LT_NOTARY_OWN_SUBMISSIONS": "22222222-2222-2222-2222-222222222222"}):
             result = self.notarize_with(request)
         self.assertEqual(result["status"], "Accepted")
         self.assertEqual(self.calls, ["history", "submit", "info"])
+
+    def test_another_runs_newer_submission_still_blocks(self):
+        def request(arguments, _timeout):
+            self.calls.append(arguments[0])
+            return {"history": [{
+                "id": "99999999-9999-9999-9999-999999999999",
+                "status": "In Progress",
+                "createdDate": "2026-11-14T08:45:00.000Z",
+            }]}, ""
+
+        with patch.dict(os.environ, {"LT_NOTARY_OWN_SUBMISSIONS": "22222222-2222-2222-2222-222222222222"}):
+            with self.assertRaisesRegex(notary.NotarizationError, "99999999-9999-9999-9999-999999999999"):
+                self.notarize_with(request)
+        self.assertEqual(self.calls, ["history"])
+
+    def test_only_an_accepted_matching_receipt_is_owned(self):
+        self.receipt.write_text(json.dumps({
+            "id": "22222222-2222-2222-2222-222222222222",
+            "status": "Accepted",
+            "sha256": notary.archive_hash(self.payload),
+        }))
+        self.assertEqual(notary.accepted_submission_id(self.payload), "22222222-2222-2222-2222-222222222222")
+        self.payload.write_bytes(b"different-bytes")
+        self.assertEqual(notary.accepted_submission_id(self.payload), "")
+        self.payload.write_bytes(b"signed-installer")
+        self.receipt.write_text(json.dumps({
+            "id": "22222222-2222-2222-2222-222222222222",
+            "status": "Submitted",
+            "sha256": notary.archive_hash(self.payload),
+        }))
+        self.assertEqual(notary.accepted_submission_id(self.payload), "")
 
     def test_old_pending_submission_does_not_block_a_later_release(self):
         def request(arguments, _timeout):
