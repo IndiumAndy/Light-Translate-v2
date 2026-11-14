@@ -33,6 +33,10 @@ cleanup() {
 trap cleanup EXIT
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_DIR" "$DMG_PATH" >/dev/null
 MOUNTED=true
+[[ -L "$MOUNT_DIR/Applications" && "$(readlink "$MOUNT_DIR/Applications")" == /Applications ]] || {
+  echo 'Installer is missing the Applications folder link.' >&2
+  exit 1
+}
 APP_PATH="$MOUNT_DIR/Light Translate.app"
 [[ -d "$APP_PATH" ]] || { echo 'Installer does not contain Light Translate.app' >&2; exit 1; }
 verify_identity "$APP_PATH"
